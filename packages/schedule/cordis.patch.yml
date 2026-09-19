@@ -1,0 +1,7 @@
+# 挂载 DSH 官方定时任务插件（包已在本地 node_modules，随 dsh 分发）
+# 挂载后每个【新创建】的根 agent 会获得 schedule_create 等排程工具，
+# 可对话式设定周期任务（如"每天早上 8 点生成 RSS 日报存知识库"）
+# 注意：仅对插件加载之后新发布的根 agent 生效；已存在的会话与运行时子代理不会获得
+- insert:
+    - id: dsh-schedule
+      name: '@deepseek-ai/dsh-schedule'

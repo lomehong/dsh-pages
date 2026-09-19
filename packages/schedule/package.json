@@ -1,0 +1,9 @@
+{
+  "name": "@dsh-pages/schedule",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}
