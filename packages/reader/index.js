@@ -878,9 +878,10 @@ function start(ctx) {
         properties: { feedId: { type: 'string', description: '可选，单个订阅 id' } },
       },
       output: {
-        schema: { type: ['array', 'object'] },
+        // 宿主 schema 校验不接受类型数组，输出统一包一层对象
+        schema: { type: 'object', additionalProperties: true },
         render: (_a, v) => {
-          const arr = Array.isArray(v) ? v : [v];
+          const arr = Array.isArray(v?.results) ? v.results : [];
           const bad = arr.filter((r) => r && r.ok === false);
           return text(`刷新完成：${arr.length - bad.length} 成功${bad.length ? `，${bad.length} 失败（${bad.map((b) => b.error).join('；')}）` : ''}`);
         },
@@ -889,7 +890,8 @@ function start(ctx) {
       execute: async (args) => {
         await api().ready;
         const id = args?.feedId ? String(args.feedId) : null;
-        return id ? await api().refreshFeed(id) : await api().refreshAll();
+        const results = id ? [await api().refreshFeed(id)] : await api().refreshAll();
+        return { results };
       },
     });
 

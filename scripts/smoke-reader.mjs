@@ -84,6 +84,10 @@ const ctx = {
     register(def) {
       if (!def?.name || typeof def.execute !== 'function') throw new Error('bad tool definition');
       if (toolDefs.has(def.name)) throw new Error(`duplicate tool ${def.name}`);
+      // 与宿主一致的 schema 校验：type 必须是单个类型字符串，不接受类型数组
+      if (Array.isArray(def.output?.schema?.type)) {
+        throw new Error('unsupported JSON schema: schema.type must be a single type string');
+      }
       toolDefs.set(def.name, def);
       return () => toolDefs.delete(def.name);
     },
