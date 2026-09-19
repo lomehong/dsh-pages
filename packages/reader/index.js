@@ -64,8 +64,9 @@ const KbEntrySchema = z.object({
 const DomainSpec = {
   // 单元名规则 /^[a-z][a-z0-9_]*$/（dsh-storage UNIT_NAME_RE），连字符非法
   name: 'dsh_pages_reader',
-  version: 2,
-  compatibleVersions: [1],
+  // 版本纪律：single 布局的版本校验是严格相等（compatibleVersions 只对 per-record 布局生效）。
+  // 纯增量加表（旧代码读时忽略多出的表）不算结构变更，保持 v1；改字段/删表才 bump 并写迁移
+  version: 1,
   invalidRecords: 'backup-and-skip',
   global: {
     schema: z.object({ mediaSecret: z.string(), seeded: z.boolean() }),
