@@ -9,7 +9,9 @@ DSH 内置 RSS 阅读器：Docker 数据层（RSSHub + wewe-rss）+ DSH 插件�
 - [x] P2：10 个 agent 工具（reader_* × 6 + kb_* × 4）经 `agent/created` per-agent 注入，子代理实测通过
 - [x] P3：星标 / 关键词过滤 / OPML 批量导入
 - [x] 公众号：weread_mp 扫码授权 → 全文 + mmbiz 图片代理实测 200
-- [x] P4 知识库：📚 视图（搜索/详情/笔记）+ 文章 📥 入库 + 日报 📨 归档 + `kb_save/search/read/list` 工具，子代理检索实测通过
+- [x] P4 知识库：📚 视图（搜索/详情/笔记）+ 文章 📥 收藏 + 日报 📨 归档 + `kb_save/search/read/list` 工具，子代理检索实测通过
+- [x] P5 安全与可靠性加固：两层 HTML 消毒 / per-record 存储 / 星标豁免裁剪 / 刷新防重入 / 真宿主探针
+- [x] P6 信息架构重构：两个空间一个舞台——「阅读/知识库」分段切换、订阅与知识库分离导航、共享持久阅读舞台（文章↔笔记推栈往返）、未读/全部/星标分段视图、SVG 图标与 toast 轻提示；纯 client.js，UI 状态 localStorage 持久化
 - [ ] 可选后续：qdrant + embedding 语义检索（关键词检索不够用时）；接 dsh-schedule 定时日报
 
 ## 插件开发约定（血泪教训）
@@ -20,9 +22,33 @@ DSH 内置 RSS 阅读器：Docker 数据层（RSSHub + wewe-rss）+ DSH 插件�
 - **静态 `export const inject` 决定挂载顺序**：运行时 `ctx.inject` 回调对**尚未挂载**的服务同样静默丢弃——用到的服务全部写进静态 inject（范式：im-channel `['agents','tools']`），加载器会等服务齐了再启动插件
 - **webServer 前缀路由不带尾斜杠**：匹配规则是 `pathname === prefix || startsWith(prefix + '/')`，注册 `/reader-api/` 会让所有子路径 404；正确是 `/reader-api`
 - **存储域单元名规则** `/^[a-z][a-z0-9_]*$/`（连字符/大写非法），表名同规则
+- **存储域选 per-record 布局**：single 布局每次 `put` 都把整个单元 JSON 全量重写落盘（全文 HTML 下是灾难级写放大），声明 `layout: 'per-record'` 一记录一文件；`compatibleVersions` 也只对 per-record 生效
+- **远程 HTML 进 innerHTML 前必须消毒**；纯文本渲染必须先整体转义再恢复结构（`kbRender` 先 escape 再链接化）——CSS `!important` 中和解决的是审美不是安全
 - **`apply()` 绝不抛错**：装载期异常会拖死整个宿主；入口必须顶层 try/catch 兜底
 - **link 插件依赖自持**：改动 `packages/reader` 后先在该目录 `npm install`，再 `node ../scripts/smoke-reader.mjs` 干跑验证，最后才重启宿主
 - **host 代码改动需重启 DSH Desktop 生效**；client 改动经 HMR 生效
+
+## 安全模型（两层 HTML 消毒）
+
+订阅内容是远程不可信输入，渲染管线两层防御：
+
+1. **服务端正则快滤**（`packages/reader/index.js` `sanitizeHtml`，所有 `/reader-api/item` 响应出口生效）：删除 script/iframe/svg/form 等危险容器、`on*/style/data-*` 等属性；URL 属性（href/src/poster）实体解码 + 控制字符剥离后做协议白名单（http/https/mailto/相对地址，src 另放行 `data:image/*`），防 `&#106;avascript:`、`java\tscript:` 变体；懒加载 `data-src` 先迁移为 `src` 再清理
+2. **客户端 DOMParser 白名单重建**（`packages/reader/client.js` `sanitizeArticleHtml`，`dangerouslySetInnerHTML` 前最后一道）：用浏览器解析器按标签/属性白名单重建 DOM，解析器差异由浏览器语义兜底；外链统一 `target=_blank + rel=noopener noreferrer`
+
+知识库视图 `kbRender` 走纯文本通道：先整体 HTML 转义，再恢复标题/列表/链接结构——feed 标题里的尖括号不可能成为活标签。
+
+- webServer 路由层无鉴权：`/reader-api` `/reader-media` 仅限本机回环使用，**勿把 webServer 绑定 0.0.0.0**
+- 媒体代理：随机 secret 门禁 + 协议白名单防 SSRF；下载字节上限 15MB（content-length 缺失时按实际字节数兜底）；请求体上限 5MB
+
+## 可靠性设计
+
+- **存储**：`dsh_pages_reader` 为 per-record 布局（一记录一文件）。以新代码首开时由存储后端自动从旧 single 文件迁移（legacy bootstrap），旧 `storages/dsh_pages_reader.json` 原样保留，确认数据完整后可手动删除
+- **留存**：每订阅保留最新 120 条，**星标条目无论多旧一律豁免裁剪**
+- **刷新**：`refreshAll` 防重入（进行中再触发返回 `{skipped:true}`）+ 订阅间并发 4；抓取合并在存储域写链内用 `update` 原子完成，并发的已读/星标标记不会被覆盖
+- **验证**：
+  - `node scripts/smoke-reader.mjs`——mock 宿主干跑（严格上下文 + 合成敌意源 + 裁剪回归），前置 RSSHub 容器在 :1200
+  - `node scripts/probe-host.mjs`——**真宿主契约探针**（只读端点形状 + 错误密钥 404 + 服务端消毒生效 + 订阅增删自清理），宿主重启加载新代码后跑一次；mock 测试防不住的宿主漂移靠它显式暴露
+  - 工具平面：以新会话工具清单含 10 个 `reader_*`/`kb_*` 工具为准
 
 ## 启动 / 停止
 
