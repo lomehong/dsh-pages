@@ -14,6 +14,7 @@ if (!Array.isArray(inject) || !inject.includes('storageDomain') || !inject.inclu
 const routes = new Map();
 const disposers = [];
 const domains = new Map();
+const openedSpecs = new Map(); // 记录 open() 收到的 spec，供布局断言
 const toolDefs = new Map();
 
 function makeTable() {
@@ -59,6 +60,7 @@ const ctx = {
       for (const t of Object.keys(spec.tables ?? {})) {
         if (!UNIT_NAME_RE.test(t)) throw new Error(`invalid table name '${t}'`);
       }
+      openedSpecs.set(spec.name, spec);
       const tables = new Map();
       let globalVal = spec.global?.initial;
       const dom = {
@@ -142,6 +144,13 @@ const check = (name, cond, extra = '') => {
   if (!cond) failed += 1;
 };
 
+// ---- 存储域布局：必须 per-record（single 布局每次 put 全量重写整个单元文件，写放大不可接受）
+check(
+  '存储域为 per-record 布局',
+  openedSpecs.get('dsh_pages_reader')?.layout === 'per-record',
+  `layout=${openedSpecs.get('dsh_pages_reader')?.layout ?? '（未声明）'}`,
+);
+
 // ---- 等待初始化（种子源真实抓取 RSSHub）
 console.log('等待种子源抓取（localhost:1200）…');
 let feeds = [];
@@ -208,30 +217,66 @@ check(
 );
 
 // ---- 回归：Atom 的 content:encoded 正文（we-mp-rss 公众号源的真实形态）
-// 起进程内小服务器提供一个带 content:encoded 全文的合成 Atom feed
+//      + 服务端 HTML 消毒 + 留存裁剪的星标豁免
+// 起进程内小服务器提供【可动态切换内容】的合成 Atom feed
 const { createServer } = await import('node:http');
-const longText = '公众号正文内容。'.repeat(200); // 1600+ 字符，远超摘要
-const syntheticAtom = `<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
-<title>合成公众号</title>
-<entry><id>syn-1</id><title>合成文章</title><link href="https://mp.weixin.qq.com/s/abc"/><updated>2026-09-19T12:00:00+08:00</updated><summary>摘要</summary><author>合成</author><content:encoded>&lt;p&gt;${longText}&lt;/p&gt;</content:encoded></entry>
-</feed>`;
+
+const xmlEscape = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// 敌意内容：服务端快滤（本测试断言）+ 客户端 DOMParser 消毒（真宿主探针断言）都应拦下
+const HOSTILE_HTML =
+  '<script>alert(1)</script><img src=x onerror=alert(1)><a href="javascript:alert(1)">点我</a><iframe src="https://evil.example"></iframe>';
+// k=1 最旧、k=n 最新（真实 feed 是"新增更新"，增长把旧条目挤出 KEEP 窗口）
+const synItem = (k) => {
+  const d = new Date(Date.UTC(2026, 0, 1, 12) + k * 3600 * 1000).toISOString();
+  const contentHtml = `${k === 1 ? HOSTILE_HTML : ''}<p>正文内容 ${k}。</p>`;
+  return (
+    `<entry><id>syn-${k}</id><title>合成文章 #${String(k).padStart(3, '0')}</title>` +
+    `<link href="https://mp.weixin.qq.com/s/syn-${k}"/><updated>${d}</updated>` +
+    `<summary>摘要 ${k}</summary><author>合成</author>` +
+    `<content:encoded>${xmlEscape(contentHtml)}</content:encoded></entry>`
+  );
+};
+const makeAtom = (n) => {
+  const entries = [];
+  for (let k = 1; k <= n; k++) entries.push(synItem(k));
+  return (
+    `<?xml version="1.0" encoding="utf-8"?>\n` +
+    `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n` +
+    `<title>合成公众号</title>\n${entries.join('\n')}\n</feed>`
+  );
+};
+let synBody = makeAtom(3);
 const synServer = createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/atom+xml; charset=utf-8' });
-  res.end(syntheticAtom);
+  res.end(synBody);
 });
 await new Promise((r) => synServer.listen(0, '127.0.0.1', r));
 const synPort = synServer.address().port;
 try {
   const addR = await callApi('POST', 'feeds/add', { url: `http://127.0.0.1:${synPort}/feed.atom` });
-  check('合成 Atom 源添加成功', addR.json?.ok === true && addR.json.added === 1, JSON.stringify(addR.json));
-  const synItems = (await callApi('GET', `items?feedId=${addR.json.id}`)).json;
-  const synDetail = (await callApi('GET', `item?id=${encodeURIComponent(synItems[0].id)}`)).json;
-  check(
-    'content:encoded 正文完整入库',
-    synDetail?.item?.contentHtml?.length > 1000,
-    `${synDetail?.item?.contentHtml?.length ?? 0} 字符`,
-  );
+  check('合成 Atom 源添加成功', addR.json?.ok === true && addR.json.added === 3, JSON.stringify(addR.json));
+  const synList0 = (await callApi('GET', `items?feedId=${addR.json.id}`)).json;
+  const hostileItem = synList0.find((i) => i.title.endsWith('#001'));
+  const synDetail = (await callApi('GET', `item?id=${encodeURIComponent(hostileItem.id)}`)).json;
+  const html = synDetail?.item?.contentHtml ?? '';
+  check('content:encoded 正文入库且保留 img', html.includes('正文内容 1') && /<img\s/i.test(html), `${html.length} 字符`);
+  check('服务端消毒：<script>/<iframe> 整块删除', !/<script|<iframe/i.test(html), html.slice(0, 120));
+  check('服务端消毒：on* 事件属性删除', !/onerror/i.test(html));
+  check('服务端消毒：javascript: 协议删除', !/javascript:/i.test(html));
+
+  // ---- 留存裁剪：星标豁免（先加 120 条全保留 → 星标最旧 → 增长到 130 挤压窗口）
+  synBody = makeAtom(120);
+  await callApi('POST', 'feeds/refresh', { id: addR.json.id });
+  let synAll = (await callApi('GET', `items?feedId=${addR.json.id}`)).json;
+  check('裁剪窗口边界：120 条全保留', synAll.length === 120, String(synAll.length));
+  const oldest = synAll.find((i) => i.title.endsWith('#001'));
+  await callApi('POST', 'items/star', { id: oldest.id, starred: true });
+  synBody = makeAtom(130);
+  await callApi('POST', 'feeds/refresh', { id: addR.json.id });
+  synAll = (await callApi('GET', `items?feedId=${addR.json.id}`)).json;
+  check('裁剪后 = 120 最新 + 1 星标豁免', synAll.length === 121, String(synAll.length));
+  check('挤出窗口的星标条目未被裁剪', synAll.some((i) => i.title.endsWith('#001')));
+  check('挤出窗口的非星标条目已裁剪', !synAll.some((i) => i.title.endsWith('#002')));
 } finally {
   synServer.close();
 }

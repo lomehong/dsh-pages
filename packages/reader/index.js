@@ -1,6 +1,9 @@
 // dsh-pages 阅读器 · Host 半层
 // 职责：订阅管理 / RSS+Atom 抓取解析 / storageDomain 持久化 / 图片代理 / JSON API（webServer 路由）
 // 运行时约定：已安装 bundle 无 harness 全局，client↔host 走同源 HTTP（参照 im-channel 等已装插件）
+// 安全模型：订阅内容是远程不可信输入。服务端 HTML 白名单快滤（本文件 sanitizeHtml，API 出口生效）
+// + 客户端 DOMParser 白名单重建（client.js sanitizeArticleHtml，渲染前权威防线），两层互为纵深；
+// webServer 路由层无鉴权，仅限本机回环使用，webServer 勿绑定 0.0.0.0
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { XMLParser } from 'fast-xml-parser';
@@ -64,8 +67,14 @@ const KbEntrySchema = z.object({
 const DomainSpec = {
   // 单元名规则 /^[a-z][a-z0-9_]*$/（dsh-storage UNIT_NAME_RE），连字符非法
   name: 'dsh_pages_reader',
-  // 版本纪律：single 布局的版本校验是严格相等（compatibleVersions 只对 per-record 布局生效）。
-  // 纯增量加表（旧代码读时忽略多出的表）不算结构变更，保持 v1；改字段/删表才 bump 并写迁移
+  // per-record 布局（一记录一文件）：single 布局每次 put 都把整个单元 JSON 全量序列化
+  // + fsync 落盘（全文 HTML 下单元文件 15-30MB，逐条 upsert 就是逐次全量重写），
+  // per-record 把写放大降到单记录级别；且 compatibleVersions 只对 per-record 生效，
+  // 为未来字段演进留余地。从旧 single 文件首开时由存储后端自动迁移（legacy bootstrap），
+  // 旧 dsh_pages_reader.json 原样保留（确认迁移成功后可手动删除）。
+  layout: 'per-record',
+  // 版本纪律：纯增量加表（旧代码读时忽略多出的表）不算结构变更，保持 v1；
+  // 改字段/删表才 bump 并写迁移（per-record 下可用 compatibleVersions 平滑过渡）
   version: 1,
   invalidRecords: 'backup-and-skip',
   global: {
@@ -131,6 +140,57 @@ function htmlToText(html) {
     .trim();
 }
 
+// ---------------------------------------------------------------- HTML 消毒（服务端第一道，尽力而为）
+// 快滤式白名单思路：删危险容器、on*/style/data-* 等属性、非白名单协议的 URL 属性。
+// 正则实现覆盖不了全部解析器差异（如 <a/href=...>），权威消毒在客户端 DOMParser
+// 白名单重建（client.js sanitizeArticleHtml）；本函数保证 API 出口拿到的已是滤过的 HTML。
+const HTML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+function safeCodePoint(n) {
+  return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '';
+}
+function decodeEntities(v) {
+  return String(v)
+    .replace(/&#x([0-9a-f]+);?/gi, (m, h) => safeCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);?/g, (m, d) => safeCodePoint(Number(d)))
+    .replace(/&([a-z]+);/gi, (m, n) => HTML_ENTITIES[n.toLowerCase()] ?? m);
+}
+const DROP_BLOCK_RE =
+  /<(script|style|iframe|frame|frameset|object|embed|applet|template|noscript|svg|math|form|link|meta|base|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const DROP_LONELY_RE =
+  /<\/?(?:script|style|iframe|frame|frameset|object|embed|applet|template|noscript|svg|math|form|link|meta|base|title)\b[^>]*>/gi;
+function sanitizeHtml(html) {
+  if (!html) return '';
+  let s = String(html)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(DROP_BLOCK_RE, ' ')
+    .replace(DROP_LONELY_RE, ' ');
+  // 懒加载迁移：无 src 的 img 用 data-src 补 src（必须在删 data-* 之前；rewriteMedia 依赖 src）
+  s = s.replace(/<img\b([^>]*)>/gi, (m, attrs) => {
+    if (/\ssrc\s*=/i.test(attrs)) return m;
+    const patched = attrs.replace(/\sdata-src\s*=\s*(["'])([\s\S]*?)\1/i, (mm, q, v) => ` src="${v.replace(/"/g, '&quot;')}"`);
+    return patched === attrs ? m : `<img${patched}>`;
+  });
+  // 事件处理器 / style / data-* / 杂项危险属性（\s 或 / 分隔均可，HTML5 里 <img/src=x> 合法）
+  s = s.replace(
+    /(?:\s|\/)(?:on[a-z]+|style|data-[a-z-]+|srcset|ping|background|dynsrc|lowsrc|formaction|id|name)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi,
+    '',
+  );
+  // URL 属性协议过滤：实体解码 + 控制字符剥离后判定，防 java\tscript: / &#106;avascript: 变体。
+  // 仅放行 http/https/mailto/相对地址；src 额外放行 data:image/*（img 上下文脚本惰性）
+  s = s.replace(/(\s(?:href|src|poster)\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))/gi, (m, pre, whole, dq, sq, bare) => {
+    const raw = dq !== undefined ? dq : sq !== undefined ? sq : bare ?? '';
+    const decoded = decodeEntities(raw).replace(/[\x00-\x20]+/g, '');
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(decoded);
+    if (scheme) {
+      const p = scheme[1].toLowerCase();
+      const ok = p === 'http' || p === 'https' || p === 'mailto' || (p === 'data' && /^data:image\//i.test(decoded));
+      if (!ok) return '';
+    }
+    return m;
+  });
+  return s;
+}
+
 // 在线正文粗提取：去噪后优先 <article>/<main>，供摘要型源补全文（尽力而为，复杂排版可能不准）
 async function extractFulltext(url, timeoutMs) {
   const res = await fetch(url, {
@@ -181,6 +241,15 @@ function collectOpmlUrls(node, out = []) {
 
 const b64urlEncode = (s) => Buffer.from(s, 'utf8').toString('base64url');
 const b64urlDecode = (s) => Buffer.from(s, 'base64url').toString('utf8');
+
+// 定并发池：固定 worker 数消费队列（fn 自身负责不抛，如 refreshFeed 内部已 catch）
+async function mapPool(list, limit, fn) {
+  const queue = [...list];
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
+    while (queue.length) await fn(queue.shift());
+  });
+  await Promise.all(workers);
+}
 
 // ---------------------------------------------------------------- 插件入口
 
@@ -364,8 +433,7 @@ function start(ctx) {
     for (const it of parsedItems) {
       if (!it.link && !it.guid) continue;
       const key = sha(`${feedId}|${it.guid || it.link || it.title}`);
-      const existing = items().get(key);
-      await items().put(key, {
+      const base = {
         feedId,
         title: it.title,
         link: it.link,
@@ -373,15 +441,30 @@ function start(ctx) {
         publishedAt: it.publishedAt,
         snippet: it.snippet,
         contentHtml: it.contentHtml,
-        readAt: existing?.readAt ?? null,
-        starredAt: existing?.starredAt ?? null,
-      });
-      if (!existing) added += 1;
+      };
+      // readAt/starredAt 必须在【写链内】合并：update 的 fn 拿到的是已提交的最新记录，
+      // 并发的 markRead/star 不会被抓取用旧快照覆盖（旧实现 get→put 跨链读改写有竞态）
+      if (items().get(key)) {
+        await items().update(key, (cur) => ({
+          ...base,
+          readAt: cur.readAt ?? null,
+          starredAt: cur.starredAt ?? null,
+        }));
+      } else {
+        await items().put(key, { ...base, readAt: null, starredAt: null });
+        added += 1;
+      }
     }
-    // 保留每个订阅最新的 N 条
+    // 留存裁剪：每订阅保留最新 N 条；星标条目无论多旧一律豁免（星标 = 长期保存的承诺）
     const mine = [...items().entries()].filter(([, v]) => v.feedId === feedId);
     mine.sort((a, b) => (a[1].publishedAt < b[1].publishedAt ? 1 : -1));
-    for (const [key] of mine.slice(KEEP_ITEMS_PER_FEED)) await items().delete(key);
+    const survivors = new Set(mine.slice(0, KEEP_ITEMS_PER_FEED).map(([k]) => k));
+    for (const [key, v] of mine.slice(KEEP_ITEMS_PER_FEED)) {
+      if (v.starredAt) survivors.add(key);
+    }
+    for (const [key] of mine) {
+      if (!survivors.has(key)) await items().delete(key);
+    }
     return added;
   }
 
@@ -434,10 +517,23 @@ function start(ctx) {
     }
   }
 
+  // 全量刷新防重入：客户端每次挂载面板会触发 feeds/refresh，与 15min 定时器、手动刷新叠加；
+  // 进行中再触发返回 {skipped} 而不是排队第二轮。订阅间并发 4，避免 N×25s 串行超过刷新周期
+  let refreshInFlight = null;
+
   async function refreshAll() {
-    const out = [];
-    for (const id of [...feeds().keys()]) out.push(await refreshFeed(id));
-    return out;
+    if (refreshInFlight) return { skipped: true, reason: '已有刷新正在进行' };
+    refreshInFlight = (async () => {
+      const ids = [...feeds().keys()];
+      const out = [];
+      await mapPool(ids, 4, async (id) => out.push(await refreshFeed(id)));
+      return out;
+    })();
+    try {
+      return await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+    }
   }
 
   function listFeeds() {
@@ -462,7 +558,7 @@ function start(ctx) {
   }
 
   function listItems(feedId, unreadOnly, starredOnly) {
-    const feedMap = new Map(feeds ? [...feeds().entries()] : []);
+    const feedMap = new Map([...feeds().entries()]);
     const out = [];
     for (const [id, v] of items().entries()) {
       if (feedId && v.feedId !== feedId) continue;
@@ -505,10 +601,19 @@ function start(ctx) {
     res.end(JSON.stringify(obj));
   }
 
-  function readBody(req) {
+  function readBody(req, limit = 5 * 1024 * 1024) {
     return new Promise((resolve, reject) => {
       const chunks = [];
-      req.on('data', (c) => chunks.push(c));
+      let size = 0;
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > limit) {
+          reject(new Error('请求体过大'));
+          req.destroy();
+          return;
+        }
+        chunks.push(c);
+      });
       req.on('end', () => {
         if (!chunks.length) return resolve({});
         try {
@@ -575,19 +680,21 @@ function start(ctx) {
             return json(res, 200, { ok: false, error: 'OPML 解析失败' });
           }
           const urls = collectOpmlUrls(doc?.opml?.body?.outline);
-          if (urls.length === 0) return json(res, 200, { ok: false, error: 'OPML 中未找到任何订阅（xmlUrl）' });
+          // 同一 OPML 内按 url 去重，防并发池重复添加同一订阅
+          const uniq = [...new Map(urls.map((u) => [u.url, u])).values()];
+          if (uniq.length === 0) return json(res, 200, { ok: false, error: 'OPML 中未找到任何订阅（xmlUrl）' });
           const added = [];
           const skipped = [];
           const failed = [];
-          for (const { url } of urls) {
+          await mapPool(uniq, 4, async ({ url }) => {
             try {
               added.push(await addFeed(url));
             } catch (e) {
               if (/已存在/.test(e.message)) skipped.push(url);
               else failed.push({ url, error: e.message });
             }
-          }
-          return json(res, 200, { ok: true, total: urls.length, added, skipped, failed });
+          });
+          return json(res, 200, { ok: true, total: uniq.length, added, skipped, failed });
         }
 
         case 'items': {
@@ -611,7 +718,9 @@ function start(ctx) {
               link: v.link,
               author: v.author,
               publishedAt: v.publishedAt,
-              contentHtml: rewriteMedia(v.contentHtml),
+              // 服务端白名单快滤在前（API 出口契约），客户端 DOMParser 重建在后（权威防线），
+              // rewriteMedia 最后把 img 改写指向媒体代理
+              contentHtml: rewriteMedia(sanitizeHtml(v.contentHtml)),
               snippet: v.snippet,
               starred: !!v.starredAt,
             },
@@ -775,8 +884,10 @@ function start(ctx) {
       }
       if (!r.ok) return fail(502, `upstream ${r.status}`);
       const len = Number(r.headers.get('content-length') ?? 0);
+      // 双保险：content-length 缺失/谎报时也用实际字节数兜底
       if (len > MEDIA_BYTES_LIMIT) return fail(502, 'too large');
       const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > MEDIA_BYTES_LIMIT) return fail(502, 'too large');
       const ctype = r.headers.get('content-type') ?? 'application/octet-stream';
       mediaCache.set(key, { buf, ctype });
       if (mediaCache.size > MEDIA_CACHE_LIMIT) {
@@ -1127,6 +1238,7 @@ function start(ctx) {
         schema: { type: 'object', additionalProperties: true },
         render: (_a, v) => {
           const arr = Array.isArray(v?.results) ? v.results : [];
+          if (arr.length === 1 && arr[0]?.skipped) return text('已有一轮刷新正在进行，本轮跳过');
           const bad = arr.filter((r) => r && r.ok === false);
           return text(`刷新完成：${arr.length - bad.length} 成功${bad.length ? `，${bad.length} 失败（${bad.map((b) => b.error).join('；')}）` : ''}`);
         },
@@ -1135,7 +1247,8 @@ function start(ctx) {
       execute: async (args) => {
         await api().ready;
         const id = args?.feedId ? String(args.feedId) : null;
-        const results = id ? [await api().refreshFeed(id)] : await api().refreshAll();
+        const r = id ? [await api().refreshFeed(id)] : await api().refreshAll();
+        const results = Array.isArray(r) ? r : [{ ok: true, skipped: true }];
         return { results };
       },
     });
