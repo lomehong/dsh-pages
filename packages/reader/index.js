@@ -173,7 +173,7 @@ let apiImpl = null;
 let registerReaderToolsRef = null;
 
 // apply 绝不抛出：任何装载期异常只禁用本插件，不拖死宿主
-// 静态 inject 已保证三服务就绪，两个运行时 inject 均同步解析
+// 静态 inject 保证三服务挂载后再启动；ctx.tools 直接属性访问（勿用运行时 inject 子 fiber）
 export function apply(ctx) {
   try {
     ctx.inject(['storageDomain', 'webServer'], (wctx) => {
@@ -182,17 +182,17 @@ export function apply(ctx) {
   } catch (e) {
     console.error(`[${PLUGIN}] apply failed: ${e?.stack || e}`);
   }
+  // 工具注册：静态 inject 保证 ctx.tools 直接可用（im-channel registerGlobal 同款访问路径）。
+  // 不要写成 ctx.inject(['tools'], cb)——子 fiber 的 inject 解析在本部署会静默失活。
   try {
-    ctx.inject(['tools'], (tctx) => {
-      if (registerReaderToolsRef) {
-        registerReaderToolsRef(tctx.tools, () => apiImpl);
-        console.log(`[${PLUGIN}] reader_* tools registered`);
-      } else {
-        console.error(`[${PLUGIN}] tools registry unavailable, reader_* disabled`);
-      }
-    });
+    if (ctx.tools && typeof ctx.tools.register === 'function') {
+      registerReaderToolsRef?.(ctx.tools, () => apiImpl);
+      console.log(`[${PLUGIN}] reader_* tools registered`);
+    } else {
+      console.error(`[${PLUGIN}] ctx.tools unavailable, reader_* disabled`);
+    }
   } catch (e) {
-    console.error(`[${PLUGIN}] tools unavailable, reader_* disabled: ${e.message}`);
+    console.error(`[${PLUGIN}] tools register failed: ${e.message}`);
   }
 }
 
