@@ -1,5 +1,6 @@
 {
   "name": "@dsh-pages/schedule",
+  "description": "挂载 DSH 官方定时任务插件 dsh-schedule：为插件加载后新建的会话提供 schedule_create 等排程工具，支持对话式设定周期任务（如「每天早上 8 点生成 RSS 日报并存知识库」）。注意：仅对新发布的根 agent 生效，已存在的会话与运行时子代理不会获得排程工具。",
   "version": "1.0.0",
   "private": true,
   "type": "module",

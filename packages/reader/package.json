@@ -1,5 +1,6 @@
 {
   "name": "@dsh-pages/reader",
+  "description": "DSH 内置 RSS 阅读器：RSSHub / 微信公众号（we-mp-rss）双源订阅，三栏阅读（全文 + mmbiz 图片代理 + 深色适配），星标 / 关键词过滤 / OPML 导入，内置个人知识库（文章收藏、笔记、日报归档），并经 agent/created 为每个新会话注入 10 个工具（reader_list_feeds / reader_list_items / reader_get_article / reader_add_feed / reader_refresh / reader_digest / kb_save / kb_search / kb_read / kb_list）。数据层容器：docker compose（RSSHub :1200 + we-mp-rss :4000→8001），详见仓库 README。",
   "version": "0.1.0",
   "private": true,
   "type": "module",
