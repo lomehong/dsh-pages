@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-pages/memory",
+  "description": "将 dsh-memory 的记忆工具入口（tool-memory）挂载到 profile 运行时层：全局身份自愈监听 + 按轮记忆装配段，使所有会话（无论何种 preset）都具备记忆沉淀与注入能力，无需依赖 preset 组合。",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

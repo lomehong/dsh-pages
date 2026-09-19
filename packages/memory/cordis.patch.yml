@@ -1,0 +1,8 @@
+# 将 dsh-memory 的 tool-memory 入口挂到 profile 运行时层。
+# 效果：① 全局 agent/inbox/claimed 自愈监听——任何会话的消息进来时自动登记身份并沉淀；
+#      ② systemPrompt 按轮记忆装配段全局注册——所有会话获得记忆注入。
+# 注意：architect / digital-twin preset 内含各自的 tool-memory 行，二者并存时
+# 这两个 preset 的会话可能重复注入 memory-pack 段（幂等无害，仅少量 token 冗余）。
+- insert:
+    - id: tool-memory
+      name: '@dsh-extra/dsh-memory/tools'
