@@ -18,6 +18,8 @@ const PLUGIN = 'dsh-pages-reader';
 // 因此注册前缀绝不能带尾斜杠（/reader-api/ 会要求子路径以 // 开头，全部 404）
 const API_PREFIX = '/reader-api';
 const MEDIA_PREFIX = '/reader-media';
+// we-mp-rss 自动发现源：其"订阅列表 RSS"端点免鉴权，item.link 内含 MP_WXS_* feed id
+const WEMP_BASE = 'http://localhost:8001';
 const FETCH_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 dsh-pages-reader/0.1';
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
@@ -521,9 +523,48 @@ function start(ctx) {
   // 进行中再触发返回 {skipped} 而不是排队第二轮。订阅间并发 4，避免 N×25s 串行超过刷新周期
   let refreshInFlight = null;
 
+  // 自动发现：从 we-mp-rss 订阅列表增量同步新增公众号——we-mp-rss 里加号后无需手动接入
+  async function discoverWeMpFeeds() {
+    const seen = new Map(); // mpId -> title
+    for (let offset = 0; offset < 300; offset += 30) {
+      const res = await fetch(`${WEMP_BASE}/rss?limit=30&offset=${offset}`, {
+        headers: { 'User-Agent': FETCH_UA },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return;
+      const doc = xml.parse(await res.text());
+      const list = Array.isArray(doc.rss?.channel?.item)
+        ? doc.rss.channel.item
+        : doc.rss?.channel?.item
+          ? [doc.rss.channel.item]
+          : [];
+      for (const it of list) {
+        const m = String(txt(it.link)).match(/MP_WXS_[A-Za-z0-9]+/);
+        if (m) seen.set(m[0], txt(it.title));
+      }
+      if (list.length < 30) break;
+    }
+    let added = 0;
+    for (const mpId of seen.keys()) {
+      const feedUrl = `${WEMP_BASE}/feed/${mpId}.atom`;
+      const id = sha(feedUrl, 12);
+      if (feeds().get(id)) continue;
+      try {
+        await addFeed(feedUrl);
+        added += 1;
+      } catch {}
+    }
+    if (added > 0) console.log(`[${PLUGIN}] 自动发现 ${added} 个新公众号源`);
+  }
+
   async function refreshAll() {
     if (refreshInFlight) return { skipped: true, reason: '已有刷新正在进行' };
     refreshInFlight = (async () => {
+      try {
+        await discoverWeMpFeeds();
+      } catch (e) {
+        console.error(`[${PLUGIN}] discover failed: ${e.message}`);
+      }
       const ids = [...feeds().keys()];
       const out = [];
       await mapPool(ids, 4, async (id) => out.push(await refreshFeed(id)));
