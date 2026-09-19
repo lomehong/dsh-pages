@@ -194,6 +194,24 @@ export function apply(ctx) {
   } catch (e) {
     console.error(`[${PLUGIN}] tools register failed: ${e.message}`);
   }
+  // 每个新创建的 agent（含子代理）在其作用域内获得 reader_* 工具——全局注册在本部署
+  // 不会自动出现在会话工具表（yuyi 同款），必须 per-agent 注入。
+  // 范式：dsh-schedule 的 agent/created 监听 + agent.ctx.tools.register（作用域随 agent 回收）
+  try {
+    ctx.on('agent/created', ({ agent }) => {
+      try {
+        agent.ctx.effect(() => {
+          registerReaderToolsRef?.(agent.ctx.tools, () => apiImpl);
+          return () => {};
+        }, 'dsh-pages-reader.tools()');
+      } catch (e) {
+        console.error(`[${PLUGIN}] per-agent tools failed: ${e.message}`);
+      }
+    });
+    console.log(`[${PLUGIN}] agent/created hook installed`);
+  } catch (e) {
+    console.error(`[${PLUGIN}] agent/created hook failed: ${e.message}`);
+  }
 }
 
 function start(ctx) {
