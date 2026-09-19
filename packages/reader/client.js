@@ -490,6 +490,13 @@ window.__ModuleLoader__.load({
 .dshr-content a { color: var(--dsw-alias-brand-primary); }
 .dshr-content table { border-collapse: collapse; }
 .dshr-content td, .dshr-content th { border: 1px solid var(--dsw-alias-border-l1); padding: 6px 10px; }
+/* 深色/浅色通吃：公众号等文章的内联样式写死颜色（黑字/白底），全部中和为主题色。
+   !important 作者样式表优先级高于无 !important 的内联样式 */
+.dshr-content * { color: inherit !important; background-color: transparent !important; background-image: none !important; }
+.dshr-content a { color: var(--dsw-alias-brand-primary) !important; }
+.dshr-content pre { background-color: var(--dsw-alias-bg-layer-1) !important; }
+.dshr-content pre, .dshr-content code { color: var(--dsw-alias-label-primary) !important; }
+.dshr-content blockquote { color: var(--dsw-alias-label-secondary) !important; }
 `;
 
     // ---------------------------------------------------------------- 注册
