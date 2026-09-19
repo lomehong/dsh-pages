@@ -5,7 +5,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { XMLParser } from 'fast-xml-parser';
 
-export const inject = ['storageDomain', 'webServer'];
+// 静态 inject 决定加载器挂载顺序：等这三个服务就绪后本插件才启动。
+// 漏掉 'tools' 时，apply 期 tools 服务尚未挂载，运行时 inject 回调会被静默丢弃
+// （im-channel 的 export const inject = ['agents','tools'] 是实证范式）
+export const inject = ['storageDomain', 'webServer', 'tools'];
 
 const PLUGIN = 'dsh-pages-reader';
 // 注意：webserver 前缀匹配规则是 pathname === prefix || pathname.startsWith(prefix + '/')，
@@ -170,8 +173,7 @@ let apiImpl = null;
 let registerReaderToolsRef = null;
 
 // apply 绝不抛出：任何装载期异常只禁用本插件，不拖死宿主
-// 注意：ctx.inject 回调必须在【顶层】调用——嵌套 inject 的回调在本 cordis 版本会静默丢失
-// （dsh-architect 用独立加载项、im-channel 用顶层 inject，均不嵌套，实证有效）
+// 静态 inject 已保证三服务就绪，两个运行时 inject 均同步解析
 export function apply(ctx) {
   try {
     ctx.inject(['storageDomain', 'webServer'], (wctx) => {
