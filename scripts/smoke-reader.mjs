@@ -207,6 +207,35 @@ check(
   `total=${imp?.total} added=${imp?.added?.length} skipped=${imp?.skipped?.length} failed=${imp?.failed?.length}`,
 );
 
+// ---- 回归：Atom 的 content:encoded 正文（we-mp-rss 公众号源的真实形态）
+// 起进程内小服务器提供一个带 content:encoded 全文的合成 Atom feed
+const { createServer } = await import('node:http');
+const longText = '公众号正文内容。'.repeat(200); // 1600+ 字符，远超摘要
+const syntheticAtom = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<title>合成公众号</title>
+<entry><id>syn-1</id><title>合成文章</title><link href="https://mp.weixin.qq.com/s/abc"/><updated>2026-09-19T12:00:00+08:00</updated><summary>摘要</summary><author>合成</author><content:encoded>&lt;p&gt;${longText}&lt;/p&gt;</content:encoded></entry>
+</feed>`;
+const synServer = createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/atom+xml; charset=utf-8' });
+  res.end(syntheticAtom);
+});
+await new Promise((r) => synServer.listen(0, '127.0.0.1', r));
+const synPort = synServer.address().port;
+try {
+  const addR = await callApi('POST', 'feeds/add', { url: `http://127.0.0.1:${synPort}/feed.atom` });
+  check('合成 Atom 源添加成功', addR.json?.ok === true && addR.json.added === 1, JSON.stringify(addR.json));
+  const synItems = (await callApi('GET', `items?feedId=${addR.json.id}`)).json;
+  const synDetail = (await callApi('GET', `item?id=${encodeURIComponent(synItems[0].id)}`)).json;
+  check(
+    'content:encoded 正文完整入库',
+    synDetail?.item?.contentHtml?.length > 1000,
+    `${synDetail?.item?.contentHtml?.length ?? 0} 字符`,
+  );
+} finally {
+  synServer.close();
+}
+
 // 媒体代理：错误密钥应 404
 const mediaHandler = matchRoute('/reader-media/wrong-secret/aaaa');
 check('媒体路由已注册并可匹配', typeof mediaHandler === 'function');

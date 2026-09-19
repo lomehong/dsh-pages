@@ -320,7 +320,9 @@ function start(ctx) {
         const links = Array.isArray(e.link) ? e.link : e.link ? [e.link] : [];
         const alt = links.find((l) => (l['@_rel'] ?? 'alternate') === 'alternate') ?? links[0];
         const link = alt?.['@_href'] ?? txt(e.id);
-        const content = txt(e.content) || txt(e.summary);
+        // Atom 全文优先级：content:encoded（removeNSPrefix 后变 encoded）> content > summary
+        // 公众号源（we-mp-rss）的正文就在 content:encoded 里
+        const content = txt(e.encoded) || txt(e.content) || txt(e.summary);
         return {
           guid: txt(e.id) || link,
           title: txt(e.title) || '（无标题）',
