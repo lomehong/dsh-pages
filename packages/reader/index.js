@@ -165,15 +165,32 @@ const b64urlDecode = (s) => Buffer.from(s, 'base64url').toString('utf8');
 
 // ---------------------------------------------------------------- 插件入口
 
+// start() 完成后赋值的能力句柄与工具注册器，供顶层的注入回调取用
+let apiImpl = null;
+let registerReaderToolsRef = null;
+
 // apply 绝不抛出：任何装载期异常只禁用本插件，不拖死宿主
-// 运行时注入手法照搬 im-channel（已验证可工作的同 profile 插件）
+// 注意：ctx.inject 回调必须在【顶层】调用——嵌套 inject 的回调在本 cordis 版本会静默丢失
+// （dsh-architect 用独立加载项、im-channel 用顶层 inject，均不嵌套，实证有效）
 export function apply(ctx) {
   try {
     ctx.inject(['storageDomain', 'webServer'], (wctx) => {
-      start(wctx);
+      apiImpl = start(wctx);
     });
   } catch (e) {
     console.error(`[${PLUGIN}] apply failed: ${e?.stack || e}`);
+  }
+  try {
+    ctx.inject(['tools'], (tctx) => {
+      if (registerReaderToolsRef) {
+        registerReaderToolsRef(tctx.tools, () => apiImpl);
+        console.log(`[${PLUGIN}] reader_* tools registered`);
+      } else {
+        console.error(`[${PLUGIN}] tools registry unavailable, reader_* disabled`);
+      }
+    });
+  } catch (e) {
+    console.error(`[${PLUGIN}] tools unavailable, reader_* disabled: ${e.message}`);
   }
 }
 
@@ -720,7 +737,13 @@ function start(ctx) {
   const text = (t) => [{ type: 'text', text: t }];
   const objSchema = { type: 'object', additionalProperties: true };
 
-  function registerReaderTools(tools) {
+  function registerReaderTools(tools, getApi) {
+    // 工具 execute 延迟解析能力句柄：start() 尚未完成时给出可读错误而非崩溃
+    const api = () => {
+      const a = getApi();
+      if (!a) throw new Error('阅读器尚未就绪，请稍后重试');
+      return a;
+    };
     tools.register({
       name: 'reader_list_feeds',
       description: '列出 RSS 阅读器的全部订阅源（未读数、最近抓取时间与错误状态）。',
@@ -735,14 +758,14 @@ function start(ctx) {
       },
       isConcurrencySafe: () => true,
       execute: async () => {
-        await ready;
-        return listFeeds();
+        await api().ready;
+        return api().listFeeds();
       },
     });
 
     tools.register({
       name: 'reader_list_items',
-      description: '列出阅读器文章（按时间倒序，可按订阅/未读过滤）。返回 id、标题、订阅名、发布时间、摘要；读正文用 reader_get_article。',
+      description: '列出阅读器文章（按时间倒序，可按订阅/未读/星标过滤）。返回 id、标题、订阅名、发布时间、摘要；读正文用 reader_get_article。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -764,14 +787,12 @@ function start(ctx) {
       },
       isConcurrencySafe: () => true,
       execute: async (args) => {
-        await ready;
+        await api().ready;
         const a = args ?? {};
         const limit = Math.min(Math.max(Number(a.limit) || 30, 1), 100);
-        return listItems(
-          a.feedId ? String(a.feedId) : null,
-          a.unreadOnly === true,
-          a.starredOnly === true,
-        ).slice(0, limit);
+        return api()
+          .listItems(a.feedId ? String(a.feedId) : null, a.unreadOnly === true, a.starredOnly === true)
+          .slice(0, limit);
       },
     });
 
@@ -797,9 +818,9 @@ function start(ctx) {
       timeoutMs: 45000,
       isConcurrencySafe: () => true,
       execute: async (args) => {
-        await ready;
+        await api().ready;
         const a = args ?? {};
-        const r = await getArticleText(String(a.id ?? ''), a.full === true);
+        const r = await api().getArticleText(String(a.id ?? ''), a.full === true);
         return r ?? { ok: false, error: '文章不存在' };
       },
     });
@@ -819,9 +840,9 @@ function start(ctx) {
       },
       timeoutMs: 45000,
       execute: async (args) => {
-        await ready;
+        await api().ready;
         try {
-          return { ok: true, ...(await addFeed(String(args?.url ?? ''))) };
+          return { ok: true, ...(await api().addFeed(String(args?.url ?? ''))) };
         } catch (e) {
           return { ok: false, error: e.message };
         }
@@ -846,9 +867,9 @@ function start(ctx) {
       },
       timeoutMs: 90000,
       execute: async (args) => {
-        await ready;
+        await api().ready;
         const id = args?.feedId ? String(args.feedId) : null;
-        return id ? await refreshFeed(id) : await refreshAll();
+        return id ? await api().refreshFeed(id) : await api().refreshAll();
       },
     });
 
@@ -873,22 +894,12 @@ function start(ctx) {
       },
       isConcurrencySafe: () => true,
       execute: async (args) => {
-        await ready;
+        await api().ready;
         const a = args ?? {};
         const hours = Math.min(Math.max(Number(a.hours) || 24, 1), 24 * 30);
-        return buildDigest(hours, a.unreadOnly !== false);
+        return api().buildDigest(hours, a.unreadOnly !== false);
       },
     });
-  }
-
-  // tools 服务缺失时只禁用工具，不影响阅读器主体
-  try {
-    ctx.inject(['tools'], (tctx) => {
-      registerReaderTools(tctx.tools);
-      console.log(`[${PLUGIN}] reader_* tools registered`);
-    });
-  } catch (e) {
-    console.error(`[${PLUGIN}] tools unavailable, reader_* disabled: ${e.message}`);
   }
 
   // ---------------------------------------------------------------- 路由注册
@@ -897,4 +908,8 @@ function start(ctx) {
   ctx.webServer.register({ kind: 'prefix', path: API_PREFIX, handler: apiHandler });
   ctx.webServer.register({ kind: 'prefix', path: MEDIA_PREFIX, handler: mediaHandler });
   console.log(`[${PLUGIN}] routes registered: ${API_PREFIX}* ${MEDIA_PREFIX}*`);
+
+  // 能力句柄：顶层注册的 reader_* 工具在 execute 时取用
+  registerReaderToolsRef = registerReaderTools;
+  return { ready, listFeeds, listItems, addFeed, refreshFeed, refreshAll, getArticleText, buildDigest };
 }
