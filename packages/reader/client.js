@@ -39,6 +39,44 @@ window.__ModuleLoader__.load({
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
 
+    // 知识库受限 markdown 渲染：先整体转义，再恢复 #/##/### 标题、- 列表与链接。
+    // 面向日报与纯文本快照，够用且安全（不做任意 markdown）
+    function kbRender(text) {
+      const anchor = (u) => {
+        const short = u.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        const shown = short.length > 46 ? `${short.slice(0, 46)}…` : short;
+        return `<a href="${u}" target="_blank" rel="noopener noreferrer">${shown}</a>`;
+      };
+      const out = [];
+      let inList = false;
+      const closeList = () => {
+        if (inList) {
+          out.push('</ul>');
+          inList = false;
+        }
+      };
+      for (const raw of String(text ?? '').split(/\r?\n/)) {
+        const line = raw.trim();
+        if (/^###\s+/.test(line)) { closeList(); out.push(`<h5>${line.replace(/^###\s+/, '')}</h5>`); continue; }
+        if (/^##\s+/.test(line)) { closeList(); out.push(`<h4>${line.replace(/^##\s+/, '')}</h4>`); continue; }
+        if (/^#\s+/.test(line)) { closeList(); out.push(`<h3>${line.replace(/^#\s+/, '')}</h3>`); continue; }
+        if (/^(?:[-•*]|\d+[.、])\s+/.test(line)) {
+          if (!inList) { out.push('<ul>'); inList = true; }
+          out.push(`<li>${line.replace(/^(?:[-•*]|\d+[.、])\s+/, '')}</li>`);
+          continue;
+        }
+        closeList();
+        if (line === '') { out.push('<div class="dshr-kb-sp"></div>'); continue; }
+        out.push(`<p>${line}</p>`);
+      }
+      closeList();
+      let html = out.join('\n');
+      // 链接化：<https://…> 自动链接（日报格式）与裸链接；显示文本截断
+      html = html.replace(/&lt;(https?:\/\/[^&\s]+?)&gt;/g, (m, u) => anchor(u));
+      html = html.replace(/(^|[\s(])((?:https?:\/\/)[^\s<]+?)(?=[。）)\s]|$)/g, (m, pre, u) => pre + anchor(u));
+      return html;
+    }
+
     // ---------------------------------------------------------------- 侧边栏图标
 
     function PanelIcon(props) {
@@ -582,8 +620,8 @@ window.__ModuleLoader__.load({
                     h('button', { className: 'dshr-btn dshr-btn-primary', onClick: saveKbNote }, '保存笔记'),
                   ),
                   h('div', {
-                    className: 'dshr-content',
-                    dangerouslySetInnerHTML: { __html: kbDetail.contentText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>') },
+                    className: 'dshr-content dshr-kb-md',
+                    dangerouslySetInnerHTML: { __html: kbRender(kbDetail.contentText) },
                   }),
                 )
               : h('div', { className: 'dshr-empty' }, '选择一条知识库条目查看'),
@@ -642,6 +680,7 @@ window.__ModuleLoader__.load({
                               className: 'dshr-related-item',
                               onClick: () => {
                                 setKbView(true);
+                                loadKb(kbQuery.trim()); // 跳转时同步加载列表，避免中栏空提示
                                 openKbEntry(k.id);
                               },
                             },
@@ -694,6 +733,15 @@ window.__ModuleLoader__.load({
 .dshr-related-item { padding: 6px 4px; border-radius: 6px; cursor: pointer; }
 .dshr-related-item:hover { background: var(--dsw-alias-bg-layer-1); }
 .dshr-related-title { font-size: 13px; line-height: 1.5; }
+.dshr-kb-md h3 { font-size: 18px; margin: 18px 0 10px; }
+.dshr-kb-md h4 { font-size: 15px; margin: 16px 0 8px; color: var(--dsw-alias-brand-primary); }
+.dshr-kb-md h5 { font-size: 13px; margin: 12px 0 6px; }
+.dshr-kb-md ul { margin: 4px 0 10px; padding-left: 18px; }
+.dshr-kb-md li { margin: 3px 0; line-height: 1.7; }
+.dshr-kb-md p { margin: 6px 0; line-height: 1.7; }
+.dshr-kb-md a { color: var(--dsw-alias-brand-primary); text-decoration: none; word-break: break-all; }
+.dshr-kb-md a:hover { text-decoration: underline; }
+.dshr-kb-sp { height: 6px; }
 .dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 0 2px; visibility: hidden; }
 .dshr-feed:hover .dshr-feed-del { visibility: visible; }
 .dshr-hint { padding: 16px 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.7; }
