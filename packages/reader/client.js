@@ -79,6 +79,12 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('');
       const [refreshing, setRefreshing] = React.useState(false);
       const fileInputRef = React.useRef(null);
+      // 知识库视图
+      const [kbView, setKbView] = React.useState(false);
+      const [kbList, setKbList] = React.useState([]);
+      const [kbQuery, setKbQuery] = React.useState('');
+      const [kbDetail, setKbDetail] = React.useState(null);
+      const [kbNote, setKbNote] = React.useState('');
 
       const loadFeeds = React.useCallback(async () => {
         try {
@@ -253,6 +259,79 @@ window.__ModuleLoader__.load({
         );
       }
 
+      // ---------------- 知识库 ----------------
+      const loadKb = React.useCallback(async (q) => {
+        try {
+          const params = new URLSearchParams();
+          if (q) params.set('query', q);
+          setKbList(await api(`kb/list?${params}`));
+        } catch (e) {
+          setNotice(`知识库加载失败：${e.message || e}`);
+        }
+      }, []);
+
+      function toggleKbView() {
+        const next = !kbView;
+        setKbView(next);
+        setKbDetail(null);
+        if (next) loadKb('');
+      }
+
+      async function searchKbNow() {
+        await loadKb(kbQuery.trim());
+      }
+
+      async function openKbEntry(id) {
+        try {
+          const r = await api(`kb/entry?id=${encodeURIComponent(id)}`);
+          if (r && r.ok) {
+            setKbDetail(r.entry);
+            setKbNote(r.entry.note || '');
+          }
+        } catch (e) {
+          setNotice(`条目加载失败：${e.message || e}`);
+        }
+      }
+
+      async function saveKbNote() {
+        if (!kbDetail) return;
+        try {
+          await api('kb/note', { id: kbDetail.id, note: kbNote });
+          setKbDetail((d) => (d ? { ...d, note: kbNote } : d));
+          setNotice('笔记已保存');
+        } catch (e) {
+          setNotice(`保存失败：${e.message || e}`);
+        }
+      }
+
+      async function removeKbEntry(id) {
+        if (!window.confirm('删除这条知识库条目？')) return;
+        try {
+          await api('kb/remove', { id });
+        } catch {}
+        setKbDetail(null);
+        await loadKb(kbQuery.trim());
+      }
+
+      async function saveArticleToKb() {
+        if (!detail) return;
+        try {
+          const r = await api('kb/from-article', { articleId: detail.id, tags: [detail.feedTitle].filter(Boolean) });
+          setNotice(r && r.ok ? `已入库「${r.title}」` : `入库失败：${(r && r.error) || '未知错误'}`);
+        } catch (e) {
+          setNotice(`入库失败：${e.message || e}`);
+        }
+      }
+
+      async function archiveDigest() {
+        try {
+          const r = await api('kb/save-digest', { hours: 24, unreadOnly: false });
+          setNotice(r && r.ok ? `今日日报已归档（${r.itemCount} 篇 / ${r.feedCount} 源）` : `归档失败：${(r && r.error) || '未知错误'}`);
+        } catch (e) {
+          setNotice(`归档失败：${e.message || e}`);
+        }
+      }
+
       const totalUnread = feeds.reduce((n, f) => n + (f.unread || 0), 0);
 
       // ----- 左栏：订阅列表
@@ -322,8 +401,32 @@ window.__ModuleLoader__.load({
           h(
             'div',
             {
-              className: `dshr-feed${feedId === 'all' ? ' active' : ''}`,
-              onClick: () => setFeedId('all'),
+              className: `dshr-feed${kbView ? ' active' : ''}`,
+              onClick: toggleKbView,
+              title: '收藏的文章快照、笔记与日报归档',
+            },
+            h('span', { className: 'dshr-feed-title' }, '📚 知识库'),
+            h(
+              'button',
+              {
+                className: 'dshr-feed-del',
+                title: '归档今日日报到知识库',
+                onClick: (e) => {
+                  e.stopPropagation();
+                  archiveDigest();
+                },
+              },
+              '📨',
+            ),
+          ),
+          h(
+            'div',
+            {
+              className: `dshr-feed${!kbView && feedId === 'all' ? ' active' : ''}`,
+              onClick: () => {
+                setKbView(false);
+                setFeedId('all');
+              },
             },
             h('span', { className: 'dshr-feed-title' }, '全部'),
             totalUnread > 0 ? h('span', { className: 'dshr-badge' }, String(totalUnread)) : null,
@@ -333,8 +436,11 @@ window.__ModuleLoader__.load({
               'div',
               {
                 key: f.id,
-                className: `dshr-feed${feedId === f.id ? ' active' : ''}`,
-                onClick: () => setFeedId(f.id),
+                className: `dshr-feed${!kbView && feedId === f.id ? ' active' : ''}`,
+                onClick: () => {
+                  setKbView(false);
+                  setFeedId(f.id);
+                },
                 title: f.lastError ? `抓取失败：${f.lastError}` : f.url,
               },
                h('span', { className: 'dshr-feed-title' }, f.lastError ? `⚠ ${f.title}` : f.title),
@@ -372,69 +478,154 @@ window.__ModuleLoader__.load({
         ),
       );
 
-      // ----- 中栏：文章列表
-      const itemCol = h(
-        'div',
-        { className: 'dshr-col dshr-items' },
-        items.map((it) =>
-          h(
+      // ----- 中栏：文章列表 / 知识库列表
+      const itemCol = kbView
+        ? h(
             'div',
-            {
-              key: it.id,
-              className: `dshr-item${it.read ? '' : ' unread'}${selected === it.id ? ' active' : ''}`,
-              onClick: () => openItem(it.id),
-            },
-            h('div', { className: 'dshr-item-title' }, it.starred ? `★ ${it.title}` : it.title),
+            { className: 'dshr-col dshr-items' },
             h(
               'div',
-              { className: 'dshr-item-meta' },
-              `${it.feedTitle} · ${relTime(it.publishedAt)}`,
+              { className: 'dshr-kb-search' },
+              h('input', {
+                className: 'dshr-input',
+                placeholder: '在知识库中搜索…',
+                value: kbQuery,
+                onChange: (e) => setKbQuery(e.target.value),
+                onKeyDown: (e) => {
+                  if (e.key === 'Enter') searchKbNow();
+                },
+              }),
+              h('button', { className: 'dshr-btn dshr-btn-primary', onClick: searchKbNow }, '搜索'),
             ),
-            it.snippet ? h('div', { className: 'dshr-item-snippet' }, it.snippet) : null,
-          ),
-        ),
-        items.length === 0 ? h('div', { className: 'dshr-hint' }, starredOnly ? '没有星标文章' : unreadOnly ? '没有未读文章' : '暂无文章') : null,
-      );
-
-      // ----- 右栏：阅读面板
-      const readerCol = h(
-        'div',
-        { className: 'dshr-col dshr-reader' },
-        detail
-          ? h(
-              'article',
-              { className: 'dshr-article' },
-              h('h1', { className: 'dshr-article-title' }, detail.title),
+            kbList.map((k) =>
               h(
                 'div',
-                { className: 'dshr-article-meta' },
-                `${detail.feedTitle}${detail.author ? ` · ${detail.author}` : ''} · ${relTime(detail.publishedAt)} · `,
-                h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文 ↗'),
-                ' · ',
+                {
+                  key: k.id,
+                  className: `dshr-item${kbDetail && kbDetail.id === k.id ? ' active' : ''}`,
+                  onClick: () => openKbEntry(k.id),
+                },
+                h('div', { className: 'dshr-item-title' }, `${k.kind === 'digest' ? '📰 ' : k.kind === 'manual' ? '📝 ' : '📄 '}${k.title}`),
                 h(
-                  'button',
-                  {
-                    className: `dshr-star${detail.starred ? ' starred' : ''}`,
-                    onClick: toggleStar,
-                    title: detail.starred ? '取消星标' : '加星标',
-                  },
-                  detail.starred ? '★ 已星标' : '☆ 星标',
+                  'div',
+                  { className: 'dshr-item-meta' },
+                  `${k.sourceFeedTitle || k.kind} · ${relTime(k.createdAt)}${k.tags.length ? ' · ' + k.tags.join('/') : ''}`,
                 ),
+                k.snippet ? h('div', { className: 'dshr-item-snippet' }, k.snippet) : null,
               ),
-              detail.contentHtml
-                ? h('div', {
-                    className: 'dshr-content',
-                    dangerouslySetInnerHTML: { __html: detail.contentHtml },
-                  })
-                : h(
+            ),
+            kbList.length === 0 ? h('div', { className: 'dshr-hint' }, '知识库还没有条目：阅读时点 📥 入库，或点左栏 📨 归档今日日报') : null,
+          )
+        : h(
+            'div',
+            { className: 'dshr-col dshr-items' },
+            items.map((it) =>
+              h(
+                'div',
+                {
+                  key: it.id,
+                  className: `dshr-item${it.read ? '' : ' unread'}${selected === it.id ? ' active' : ''}`,
+                  onClick: () => openItem(it.id),
+                },
+                h('div', { className: 'dshr-item-title' }, it.starred ? `★ ${it.title}` : it.title),
+                h(
+                  'div',
+                  { className: 'dshr-item-meta' },
+                  `${it.feedTitle} · ${relTime(it.publishedAt)}`,
+                ),
+                it.snippet ? h('div', { className: 'dshr-item-snippet' }, it.snippet) : null,
+              ),
+            ),
+            items.length === 0 ? h('div', { className: 'dshr-hint' }, starredOnly ? '没有星标文章' : unreadOnly ? '没有未读文章' : '暂无文章') : null,
+          );
+
+      // ----- 右栏：阅读面板 / 知识库详情
+      const readerCol = kbView
+        ? h(
+            'div',
+            { className: 'dshr-col dshr-reader' },
+            kbDetail
+              ? h(
+                  'article',
+                  { className: 'dshr-article' },
+                  h('h1', { className: 'dshr-article-title' }, kbDetail.title),
+                  h(
                     'div',
-                    { className: 'dshr-hint' },
-                    '该源未提供全文，请 ',
-                    h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文阅读'),
+                    { className: 'dshr-article-meta' },
+                    `${kbDetail.kind === 'digest' ? '📰 日报' : kbDetail.kind === 'manual' ? '📝 手动' : '📄 文章'}${kbDetail.sourceFeedTitle ? ` · ${kbDetail.sourceFeedTitle}` : ''} · ${relTime(kbDetail.createdAt)} · `,
+                    kbDetail.link
+                      ? h('a', { href: kbDetail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文 ↗')
+                      : null,
+                    ' · ',
+                    h(
+                      'button',
+                      { className: 'dshr-feed-del', style: { visibility: 'visible', fontSize: '12px' }, onClick: () => removeKbEntry(kbDetail.id) },
+                      '删除',
+                    ),
                   ),
-            )
-          : h('div', { className: 'dshr-empty' }, '选择一篇文章开始阅读'),
-      );
+                  h(
+                    'div',
+                    { className: 'dshr-kb-note' },
+                    h('div', { className: 'dshr-kb-note-label' }, '✍️ 我的笔记'),
+                    h('textarea', {
+                      className: 'dshr-kb-note-input',
+                      placeholder: '写点想法、摘录、总结…',
+                      value: kbNote,
+                      onChange: (e) => setKbNote(e.target.value),
+                    }),
+                    h('button', { className: 'dshr-btn dshr-btn-primary', onClick: saveKbNote }, '保存笔记'),
+                  ),
+                  h('div', {
+                    className: 'dshr-content',
+                    dangerouslySetInnerHTML: { __html: kbDetail.contentText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>') },
+                  }),
+                )
+              : h('div', { className: 'dshr-empty' }, '选择一条知识库条目查看'),
+          )
+        : h(
+            'div',
+            { className: 'dshr-col dshr-reader' },
+            detail
+              ? h(
+                  'article',
+                  { className: 'dshr-article' },
+                  h('h1', { className: 'dshr-article-title' }, detail.title),
+                  h(
+                    'div',
+                    { className: 'dshr-article-meta' },
+                    `${detail.feedTitle}${detail.author ? ` · ${detail.author}` : ''} · ${relTime(detail.publishedAt)} · `,
+                    h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文 ↗'),
+                    ' · ',
+                    h(
+                      'button',
+                      {
+                        className: `dshr-star${detail.starred ? ' starred' : ''}`,
+                        onClick: toggleStar,
+                        title: detail.starred ? '取消星标' : '加星标',
+                      },
+                      detail.starred ? '★ 已星标' : '☆ 星标',
+                    ),
+                    ' · ',
+                    h(
+                      'button',
+                      { className: 'dshr-star', onClick: saveArticleToKb, title: '把全文快照存入知识库' },
+                      '📥 入库',
+                    ),
+                  ),
+                  detail.contentHtml
+                    ? h('div', {
+                        className: 'dshr-content',
+                        dangerouslySetInnerHTML: { __html: detail.contentHtml },
+                      })
+                    : h(
+                        'div',
+                        { className: 'dshr-hint' },
+                        '该源未提供全文，请 ',
+                        h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文阅读'),
+                      ),
+                )
+              : h('div', { className: 'dshr-empty' }, '选择一篇文章开始阅读'),
+          );
 
       // 组件内联样式：随组件卸载清理，不依赖 styles 内建
       return h('div', { className: 'dshr-root' }, h('style', null, CSS), feedCol, itemCol, readerCol);
@@ -466,6 +657,10 @@ window.__ModuleLoader__.load({
 .dshr-filter-mark { flex: none; font-size: 11px; color: var(--dsw-alias-state-warn-primary); }
 .dshr-star { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 12px; padding: 0 2px; }
 .dshr-star:hover, .dshr-star.starred { color: var(--dsw-alias-state-warn-primary); }
+.dshr-kb-search { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dshr-kb-note { margin: 0 0 20px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); }
+.dshr-kb-note-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
+.dshr-kb-note-input { width: 100%; min-height: 72px; box-sizing: border-box; resize: vertical; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 8px; font-size: 13px; line-height: 1.6; margin-bottom: 8px; outline: none; font-family: inherit; }
 .dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 0 2px; visibility: hidden; }
 .dshr-feed:hover .dshr-feed-del { visibility: visible; }
 .dshr-hint { padding: 16px 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.7; }

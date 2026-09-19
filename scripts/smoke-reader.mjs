@@ -245,10 +245,42 @@ if (mediaHandler) {
   check('媒体路由错误密钥 404', res.status === 404);
 }
 
+// ---- 知识库（P4）
+const kbSave = (await callApi('POST', 'kb/save', {
+  title: '冒烟测试条目',
+  text: '知识库检索冒烟测试的关键词是荧光绿狐狸。',
+  tags: ['冒烟', '测试'],
+})).json;
+check('kb/save 手动条目', kbSave?.ok === true && !!kbSave.id, kbSave?.id ?? kbSave?.error);
+
+if (first) {
+  const fa = (await callApi('POST', 'kb/from-article', { articleId: first.id, tags: ['来自文章'] })).json;
+  check('kb/from-article 文章快照入库', fa?.ok === true && (fa.title?.length ?? 0) > 0, fa?.title ?? fa?.error);
+}
+
+const kbHit = (await callApi('GET', 'kb/list?query=' + encodeURIComponent('荧光绿狐狸'))).json;
+check('kb/list 关键词检索命中', Array.isArray(kbHit) && kbHit.some((i) => i.id === kbSave.id), `${kbHit?.length ?? 0} 条`);
+
+const kbEntry = (await callApi('GET', `kb/entry?id=${encodeURIComponent(kbSave.id)}`)).json;
+check('kb/entry 读取全文', kbEntry?.ok === true && kbEntry.entry.contentText.includes('荧光绿狐狸'));
+
+await callApi('POST', 'kb/note', { id: kbSave.id, note: '补一条笔记' });
+const kbAfterNote = (await callApi('GET', `kb/entry?id=${encodeURIComponent(kbSave.id)}`)).json;
+check('kb/note 笔记更新', kbAfterNote?.entry?.note === '补一条笔记');
+
+const kbArch = (await callApi('POST', 'kb/save-digest', { hours: 24 * 30, unreadOnly: false })).json;
+check('kb/save-digest 日报归档', kbArch?.ok === true && kbArch.itemCount > 0, `${kbArch?.itemCount ?? 0} 篇 / ${kbArch?.feedCount ?? 0} 源`);
+
+const kbRemove = (await callApi('POST', 'kb/remove', { id: kbSave.id })).json;
+check('kb/remove 删除', kbRemove?.ok === true);
+
 // ---- Agent 工具（P2）
-const expectedTools = ['reader_list_feeds', 'reader_list_items', 'reader_get_article', 'reader_add_feed', 'reader_refresh', 'reader_digest'];
+const expectedTools = [
+  'reader_list_feeds', 'reader_list_items', 'reader_get_article', 'reader_add_feed', 'reader_refresh', 'reader_digest',
+  'kb_save', 'kb_search', 'kb_read', 'kb_list',
+];
 check(
-  '6 个 reader_* 工具已注册',
+  '10 个 reader_*/kb_* 工具已注册',
   expectedTools.every((n) => toolDefs.has(n)),
   [...toolDefs.keys()].join(', '),
 );
@@ -278,6 +310,15 @@ if (expectedTools.every((n) => toolDefs.has(n))) {
 
     const badAdd = await execTool('reader_add_feed', { url: 'not-a-url' });
     check('reader_add_feed 非法地址 ok:false', badAdd?.ok === false);
+
+    await execTool('kb_save', { title: '工具入库条目', text: 'kb 工具链路冒烟关键词是深海蓝鲸。', tags: '冒烟' });
+    const kbSearchRes = await execTool('kb_search', { query: '深海蓝鲸' });
+    check('kb_search 命中', Array.isArray(kbSearchRes) && kbSearchRes.some((i) => i.title === '工具入库条目'));
+    const kbHit2 = kbSearchRes[0];
+    const kbReadRes = await execTool('kb_read', { id: kbHit2.id });
+    check('kb_read 读全文', kbReadRes?.contentText?.includes('深海蓝鲸'));
+    const kbListRes = await execTool('kb_list', {});
+    check('kb_list 浏览', Array.isArray(kbListRes) && kbListRes.length > 0);
   } catch (e) {
     check('工具执行链路无异常', false, e.message);
   }

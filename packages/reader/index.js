@@ -48,10 +48,24 @@ const ItemSchema = z.object({
   starredAt: z.string().nullable().default(null),
 });
 
+// 知识库条目：文章快照 / 日报归档 / 手动条目
+const KbEntrySchema = z.object({
+  kind: z.enum(['article', 'digest', 'manual']),
+  title: z.string(),
+  contentText: z.string(),
+  link: z.string().default(''),
+  sourceFeedTitle: z.string().default(''),
+  articleId: z.string().nullable().default(null),
+  note: z.string().default(''),
+  tags: z.array(z.string()).default([]),
+  createdAt: z.string(),
+});
+
 const DomainSpec = {
   // 单元名规则 /^[a-z][a-z0-9_]*$/（dsh-storage UNIT_NAME_RE），连字符非法
   name: 'dsh_pages_reader',
-  version: 1,
+  version: 2,
+  compatibleVersions: [1],
   invalidRecords: 'backup-and-skip',
   global: {
     schema: z.object({ mediaSecret: z.string(), seeded: z.boolean() }),
@@ -60,6 +74,7 @@ const DomainSpec = {
   tables: {
     feeds: { valueSchema: FeedSchema },
     items: { valueSchema: ItemSchema },
+    kb_entries: { valueSchema: KbEntrySchema },
   },
 };
 
@@ -618,6 +633,76 @@ function start(ctx) {
           return json(res, 200, { ok: true });
         }
 
+        // ---------------------------------------------------------------- 知识库 API
+        case 'kb/from-article': {
+          try {
+            const r = await saveKbEntry({
+              kind: 'article',
+              articleId: body.articleId ? String(body.articleId) : null,
+              title: body.title ? String(body.title) : '',
+              tags: body.tags ?? [],
+              note: String(body.note ?? ''),
+            });
+            return json(res, 200, { ok: true, ...r });
+          } catch (e) {
+            return json(res, 200, { ok: false, error: e.message });
+          }
+        }
+
+        case 'kb/save': {
+          try {
+            const r = await saveKbEntry({
+              kind: ['digest', 'manual', 'article'].includes(body.kind) ? body.kind : 'manual',
+              title: String(body.title ?? ''),
+              contentText: body.contentText !== undefined ? String(body.contentText) : String(body.text ?? ''),
+              link: String(body.link ?? ''),
+              sourceFeedTitle: String(body.sourceFeedTitle ?? ''),
+              note: String(body.note ?? ''),
+              tags: body.tags ?? [],
+              digest: body.digest,
+            });
+            return json(res, 200, { ok: true, ...r });
+          } catch (e) {
+            return json(res, 200, { ok: false, error: e.message });
+          }
+        }
+
+        case 'kb/save-digest': {
+          try {
+            const hours = Math.min(Math.max(Number(body.hours) || 24, 1), 24 * 30);
+            const unreadOnly = body.unreadOnly !== false;
+            return json(res, 200, { ok: true, ...(await saveDigestToKb(hours, unreadOnly)) });
+          } catch (e) {
+            return json(res, 200, { ok: false, error: e.message });
+          }
+        }
+
+        case 'kb/list': {
+          const q = u.searchParams.get('query') || '';
+          const tag = u.searchParams.get('tag') || null;
+          const kind = u.searchParams.get('kind') || null;
+          const limit = Math.min(Math.max(Number(u.searchParams.get('limit')) || 100, 1), 300);
+          return json(res, 200, searchKbEntries(q, tag, kind).slice(0, limit));
+        }
+
+        case 'kb/entry': {
+          const r = getKbEntry(u.searchParams.get('id'));
+          if (!r) return json(res, 404, { ok: false, error: '条目不存在' });
+          return json(res, 200, { ok: true, entry: r });
+        }
+
+        case 'kb/note': {
+          const id = String(body.id ?? '');
+          if (!kb().get(id)) return json(res, 200, { ok: false, error: '条目不存在' });
+          await kb().update(id, (c) => ({ ...c, note: String(body.note ?? '') }));
+          return json(res, 200, { ok: true });
+        }
+
+        case 'kb/remove': {
+          const removed = await kb().delete(String(body.id ?? ''));
+          return json(res, 200, { ok: removed });
+        }
+
         default:
           return json(res, 404, { ok: false, error: `unknown endpoint: ${method}` });
       }
@@ -754,6 +839,129 @@ function start(ctx) {
       itemCount,
       groups: [...groups.values()],
     };
+  }
+
+  // ---------------------------------------------------------------- 知识库（P4）
+
+  const kb = () => domain.table('kb_entries');
+  const newKbId = () => `kb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+  async function saveKbEntry(input) {
+    const kind = ['article', 'digest', 'manual'].includes(input.kind) ? input.kind : 'manual';
+    let title = String(input.title ?? '').trim();
+    let contentText = String(input.contentText ?? '');
+    let link = String(input.link ?? '');
+    let sourceFeedTitle = String(input.sourceFeedTitle ?? '');
+    let articleId = input.articleId ? String(input.articleId) : null;
+
+    // 从阅读器文章一键入库：自动补全标题/全文/来源
+    if (articleId) {
+      const v = items().get(articleId);
+      if (!v) throw new Error('关联文章不存在');
+      if (!contentText) contentText = htmlToText(v.contentHtml);
+      if (!title) title = v.title;
+      if (!link) link = v.link;
+      if (!sourceFeedTitle) sourceFeedTitle = feeds().get(v.feedId)?.title ?? '';
+    }
+    if (kind === 'digest' && !contentText && input.digest) {
+      contentText = digestToMarkdown(input.digest);
+    }
+    if (!title) throw new Error('标题不能为空');
+    if (!contentText.trim()) throw new Error('正文内容不能为空');
+
+    const id = newKbId();
+    const tags = Array.isArray(input.tags)
+      ? input.tags.map((t) => String(t).trim()).filter(Boolean)
+      : String(input.tags ?? '').split('|').map((t) => t.trim()).filter(Boolean);
+    await kb().put(id, {
+      kind,
+      title,
+      contentText,
+      link,
+      sourceFeedTitle,
+      articleId,
+      note: String(input.note ?? ''),
+      tags,
+      createdAt: new Date().toISOString(),
+    });
+    return { id, kind, title, tags };
+  }
+
+  async function saveDigestToKb(hours = 24, unreadOnly = true) {
+    const d = buildDigest(hours, unreadOnly);
+    if (d.itemCount === 0) throw new Error('当前窗口没有可归档的文章');
+    const id = newKbId();
+    const title = `RSS 日报 ${new Date().toISOString().slice(0, 10)}（${d.unreadOnly ? '未读' : `近 ${d.hours} 小时`}·${d.itemCount} 篇）`;
+    await kb().put(id, {
+      kind: 'digest',
+      title,
+      contentText: digestToMarkdown(d),
+      link: '',
+      sourceFeedTitle: '',
+      articleId: null,
+      note: '',
+      tags: ['日报'],
+      createdAt: new Date().toISOString(),
+    });
+    return { id, title, itemCount: d.itemCount, feedCount: d.feedCount };
+  }
+
+  function digestToMarkdown(d) {
+    const lines = [`# RSS 日报（${d.unreadOnly ? '未读' : `近 ${d.hours} 小时`} · ${d.itemCount} 篇 / ${d.feedCount} 个源）`, ''];
+    for (const g of d.groups) {
+      lines.push(`## ${g.feedTitle}`, '');
+      for (const it of g.items) {
+        lines.push(`- ${it.title}（${String(it.publishedAt).slice(0, 10)}）${it.link ? `<${it.link}>` : ''}`);
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  // 关键词检索：标题×3 / 标签×2 / 笔记×2 / 正文×1，多词 AND 语义
+  function searchKbEntries(query, tag, kind) {
+    const terms = (query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const out = [];
+    for (const [id, v] of kb().entries()) {
+      if (tag && !v.tags.includes(tag)) continue;
+      if (kind && v.kind !== kind) continue;
+      let score = 0;
+      if (terms.length > 0) {
+        const title = v.title.toLowerCase();
+        const note = (v.note ?? '').toLowerCase();
+        const content = (v.contentText ?? '').toLowerCase();
+        const tags = (v.tags ?? []).join('|').toLowerCase();
+        for (const t of terms) {
+          let s = 0;
+          if (title.includes(t)) s += 3;
+          if (tags.includes(t)) s += 2;
+          if (note.includes(t)) s += 2;
+          if (content.includes(t)) s += 1;
+          if (s === 0) { score = -1; break; }
+          score += s;
+        }
+        if (score < 0) continue;
+      }
+      out.push({
+        id,
+        kind: v.kind,
+        title: v.title,
+        snippet: (v.note || stripHtml(v.contentText)).slice(0, 120),
+        tags: v.tags ?? [],
+        link: v.link,
+        sourceFeedTitle: v.sourceFeedTitle,
+        createdAt: v.createdAt,
+        score,
+      });
+    }
+    out.sort((a, b) => (b.score - a.score) || (a.createdAt < b.createdAt ? 1 : -1));
+    return out;
+  }
+
+  function getKbEntry(id) {
+    const v = kb().get(String(id ?? ''));
+    if (!v) return null;
+    return { id: String(id), ...v };
   }
 
   const text = (t) => [{ type: 'text', text: t }];
@@ -924,6 +1132,132 @@ function start(ctx) {
         return api().buildDigest(hours, a.unreadOnly !== false);
       },
     });
+
+    tools.register({
+      name: 'kb_save',
+      description: '把一段知识存入个人知识库（手动条目/日报归档/要点摘录）。同主题已有条目时建议新存一条并在 title 里注明，不要覆盖。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'text'],
+        properties: {
+          title: { type: 'string', description: '条目标题' },
+          text: { type: 'string', description: '条目正文（纯文本）' },
+          tags: { type: 'string', description: '标签，| 分隔，如 "Rust|学习笔记"' },
+          note: { type: 'string', description: '个人笔记/批注' },
+          link: { type: 'string', description: '来源链接（可选）' },
+        },
+      },
+      output: {
+        schema: objSchema,
+        render: (_a, v) => text(v.ok ? `已入库「${v.title}」（${v.id}）` : `入库失败：${v.error}`),
+      },
+      execute: async (args) => {
+        await api().ready;
+        const a = args ?? {};
+        try {
+          const r = await api().saveKbEntry({
+            kind: 'manual',
+            title: String(a.title ?? ''),
+            contentText: String(a.text ?? ''),
+            tags: String(a.tags ?? ''),
+            note: String(a.note ?? ''),
+            link: String(a.link ?? ''),
+          });
+          return { ok: true, ...r };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      },
+    });
+
+    tools.register({
+      name: 'kb_search',
+      description: '在个人知识库中按关键词检索（标题/标签/笔记/正文，多词 AND）。返回命中条目列表（id、标题、标签、摘要）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query'],
+        properties: {
+          query: { type: 'string', description: '关键词，多词空格分隔（AND）' },
+          tag: { type: 'string', description: '限定某个标签' },
+          limit: { type: 'number', description: '返回条数，默认 20，最大 100' },
+        },
+      },
+      output: {
+        schema: { type: 'array', items: objSchema },
+        render: (_a, v) =>
+          text(
+            v.length === 0
+              ? '知识库无命中'
+              : `命中 ${v.length} 条：\n` + v.slice(0, 10).map((i) => `- [${i.id}] ${i.title}（${i.tags.join('/') || '无标签'}）`).join('\n'),
+          ),
+      },
+      isConcurrencySafe: () => true,
+      execute: async (args) => {
+        await api().ready;
+        const a = args ?? {};
+        const limit = Math.min(Math.max(Number(a.limit) || 20, 1), 100);
+        return api().searchKbEntries(String(a.query ?? ''), a.tag ? String(a.tag) : null, null).slice(0, limit);
+      },
+    });
+
+    tools.register({
+      name: 'kb_read',
+      description: '读取知识库单条全文（含个人笔记）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: { id: { type: 'string', description: '条目 id（来自 kb_search / kb_list）' } },
+      },
+      output: {
+        schema: objSchema,
+        render: (_a, v) =>
+          v?.ok === false ? text('条目不存在') : text(`《${v.title}》（${v.kind}${v.tags?.length ? '，' + v.tags.join('/') : ''}）\n${(v.contentText ?? '').slice(0, 600)}…`),
+      },
+      isConcurrencySafe: () => true,
+      execute: async (args) => {
+        await api().ready;
+        const r = api().getKbEntry(String(args?.id ?? ''));
+        if (!r) return { ok: false, error: '条目不存在' };
+        const CAP = 12000;
+        const truncated = r.contentText.length > CAP;
+        return { ok: true, ...r, contentText: truncated ? r.contentText.slice(0, CAP) : r.contentText, truncated };
+      },
+    });
+
+    tools.register({
+      name: 'kb_list',
+      description: '浏览个人知识库条目列表（可按标签/类型过滤，按时间倒序）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          tag: { type: 'string', description: '限定某个标签' },
+          kind: { type: 'string', enum: ['article', 'digest', 'manual'], description: '限定类型' },
+          limit: { type: 'number', description: '返回条数，默认 20，最大 100' },
+        },
+      },
+      output: {
+        schema: { type: 'array', items: objSchema },
+        render: (_a, v) =>
+          text(
+            v.length === 0
+              ? '知识库为空'
+              : `共 ${v.length} 条：\n` + v.slice(0, 15).map((i) => `- [${i.kind}] ${i.title}（${i.tags.join('/') || '无标签'}）`).join('\n'),
+          ),
+      },
+      isConcurrencySafe: () => true,
+      execute: async (args) => {
+        await api().ready;
+        const a = args ?? {};
+        const limit = Math.min(Math.max(Number(a.limit) || 20, 1), 100);
+        return api()
+          .searchKbEntries('', a.tag ? String(a.tag) : null, a.kind ? String(a.kind) : null)
+          .slice(0, limit);
+      },
+    });
   }
 
   // ---------------------------------------------------------------- 路由注册
@@ -935,5 +1269,10 @@ function start(ctx) {
 
   // 能力句柄：顶层注册的 reader_* 工具在 execute 时取用
   registerReaderToolsRef = registerReaderTools;
-  return { ready, listFeeds, listItems, addFeed, refreshFeed, refreshAll, getArticleText, buildDigest };
+  return {
+    ready, listFeeds, listItems, addFeed, refreshFeed, refreshAll, getArticleText, buildDigest,
+    saveKbEntry, saveDigestToKb, searchKbEntries, getKbEntry,
+    kbNote: async (id, note) => { await kb().update(String(id), (c) => ({ ...c, note: String(note ?? '') })); return true; },
+    kbRemove: async (id) => kb().delete(String(id)),
+  };
 }
