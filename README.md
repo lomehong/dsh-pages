@@ -16,6 +16,7 @@ DSH 内置 RSS 阅读器：Docker 数据层（RSSHub + wewe-rss）+ DSH 插件�
 
 - **运行时形态**：当前桌面壳的已安装 bundle **没有 `harness`/`host` 内建符号**，client↔host 通信走同源 HTTP 路由（`webServer.register` + 浏览器 fetch），参照 `im-channel` 等已装插件
 - **cordis 严格上下文**：`ctx.x` 访问未声明注入的属性会直接抛错——服务一律走 `inject` 声明，探测性访问必须整条 try/catch
+- **`ctx.inject` 回调只在顶层有效**：嵌套 inject 的回调会静默丢失（不执行也不报错）——多个服务分多个顶层 inject，跨作用域共享用模块级变量赋值
 - **webServer 前缀路由不带尾斜杠**：匹配规则是 `pathname === prefix || startsWith(prefix + '/')`，注册 `/reader-api/` 会让所有子路径 404；正确是 `/reader-api`
 - **存储域单元名规则** `/^[a-z][a-z0-9_]*$/`（连字符/大写非法），表名同规则
 - **`apply()` 绝不抛错**：装载期异常会拖死整个宿主；入口必须顶层 try/catch 兜底
