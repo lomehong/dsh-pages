@@ -105,7 +105,7 @@ window.__ModuleLoader__.load({
 
     function ReaderApp() {
       const [feeds, setFeeds] = React.useState([]);
-      const [items, setItems] = React.useState([]);
+      const [items, setItems] = React.useState(null);
       const [feedId, setFeedId] = React.useState('all');
       const [unreadOnly, setUnreadOnly] = React.useState(false);
       const [starredOnly, setStarredOnly] = React.useState(false);
@@ -117,6 +117,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('');
       const [refreshing, setRefreshing] = React.useState(false);
       const fileInputRef = React.useRef(null);
+      const [itemsLoaded, setItemsLoaded] = React.useState(false);
       // 知识库视图
       const [kbView, setKbView] = React.useState(false);
       const [kbList, setKbList] = React.useState([]);
@@ -140,6 +141,7 @@ window.__ModuleLoader__.load({
           if (unreadOnly) params.set('unreadOnly', '1');
           if (starredOnly) params.set('starredOnly', '1');
           setItems(await api(`items?${params}`));
+          setItemsLoaded(true);
         } catch (e) {
           setNotice(`加载文章失败：${e.message || e}`);
         }
@@ -297,7 +299,7 @@ window.__ModuleLoader__.load({
         setItems((cur) => cur.map((it) => (it.id === id ? { ...it, read: true } : it)));
         setFeeds((cur) =>
           cur.map((f) => {
-            const it = items.find((x) => x.id === id);
+            const it = Array.isArray(items) ? items.find((x) => x.id === id) : null;
             return it && f.id === it.feedId && f.unread > 0 ? { ...f, unread: f.unread - 1 } : f;
           }),
         );
@@ -387,29 +389,9 @@ window.__ModuleLoader__.load({
           { className: 'dshr-head' },
           h('span', { className: 'dshr-title' }, '订阅'),
           h(
-            'label',
-            { className: 'dshr-unread-toggle' },
-            h('input', {
-              type: 'checkbox',
-              checked: unreadOnly,
-              onChange: (e) => setUnreadOnly(e.target.checked),
-            }),
-            '未读',
-          ),
-          h(
-            'label',
-            { className: 'dshr-unread-toggle' },
-            h('input', {
-              type: 'checkbox',
-              checked: starredOnly,
-              onChange: (e) => setStarredOnly(e.target.checked),
-            }),
-            '星标',
-          ),
-          h(
             'button',
-            { className: 'dshr-btn', onClick: refreshNow, disabled: refreshing },
-            refreshing ? '刷新中…' : '刷新',
+            { className: 'dshr-btn', onClick: refreshNow, disabled: refreshing, title: '刷新全部订阅' },
+            refreshing ? '…' : '⟳',
           ),
         ),
         h(
@@ -522,66 +504,97 @@ window.__ModuleLoader__.load({
         ),
       );
 
-      // ----- 中栏：文章列表 / 知识库列表
-      const itemCol = kbView
-        ? h(
-            'div',
-            { className: 'dshr-col dshr-items' },
-            h(
-              'div',
-              { className: 'dshr-kb-search' },
-              h('input', {
-                className: 'dshr-input',
-                placeholder: '在知识库中搜索…',
-                value: kbQuery,
-                onChange: (e) => setKbQuery(e.target.value),
-                onKeyDown: (e) => {
-                  if (e.key === 'Enter') searchKbNow();
-                },
-              }),
-              h('button', { className: 'dshr-btn dshr-btn-primary', onClick: searchKbNow }, '搜索'),
-            ),
-            kbList.map((k) =>
-              h(
-                'div',
-                {
-                  key: k.id,
-                  className: `dshr-item${kbDetail && kbDetail.id === k.id ? ' active' : ''}`,
-                  onClick: () => openKbEntry(k.id),
-                },
-                h('div', { className: 'dshr-item-title' }, `${k.kind === 'digest' ? '📰 ' : k.kind === 'manual' ? '📝 ' : '📄 '}${k.title}`),
+      // ----- 中栏：上下文条 + 文章列表 / 知识库列表
+      const ctxLabel = kbView
+        ? `知识库 · ${kbList.length} 条`
+        : `${feedId === 'all' ? '全部订阅' : feeds.find((f) => f.id === feedId)?.title ?? '订阅'} · ${itemsLoaded ? `${items.length} 篇` : '加载中'}`;
+
+      const itemCol = h(
+        'div',
+        { className: 'dshr-col dshr-items' },
+        h(
+          'div',
+          { className: 'dshr-bar' },
+          h('span', { className: 'dshr-bar-label' }, ctxLabel),
+          kbView
+            ? [
+                h('input', {
+                  key: 'q',
+                  className: 'dshr-input dshr-bar-input',
+                  placeholder: '搜索知识库…',
+                  value: kbQuery,
+                  onChange: (e) => setKbQuery(e.target.value),
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter') searchKbNow();
+                  },
+                }),
+                h('button', { key: 'go', className: 'dshr-btn dshr-btn-primary', onClick: searchKbNow }, '搜索'),
+              ]
+            : [
+                h('label', { key: 'u', className: 'dshr-toggle' },
+                  h('input', { type: 'checkbox', checked: unreadOnly, onChange: (e) => setUnreadOnly(e.target.checked) }),
+                  '未读',
+                ),
+                h('label', { key: 's', className: 'dshr-toggle' },
+                  h('input', { type: 'checkbox', checked: starredOnly, onChange: (e) => setStarredOnly(e.target.checked) }),
+                  '星标',
+                ),
+              ],
+        ),
+        kbView
+          ? [
+              kbList.map((k) =>
                 h(
                   'div',
-                  { className: 'dshr-item-meta' },
-                  `${k.sourceFeedTitle || k.kind} · ${relTime(k.createdAt)}${k.tags.length ? ' · ' + k.tags.join('/') : ''}`,
+                  {
+                    key: k.id,
+                    className: `dshr-item${kbDetail && kbDetail.id === k.id ? ' active' : ''}`,
+                    onClick: () => openKbEntry(k.id),
+                  },
+                  h('div', { className: 'dshr-item-title' }, `${k.kind === 'digest' ? '📰 ' : k.kind === 'manual' ? '📝 ' : '📄 '}${k.title}`),
+                  h(
+                    'div',
+                    { className: 'dshr-item-meta' },
+                    `${k.sourceFeedTitle || k.kind} · ${relTime(k.createdAt)}${k.tags.length ? ' · ' + k.tags.join('/') : ''}`,
+                  ),
+                  k.snippet ? h('div', { className: 'dshr-item-snippet' }, k.snippet) : null,
                 ),
-                k.snippet ? h('div', { className: 'dshr-item-snippet' }, k.snippet) : null,
               ),
-            ),
-            kbList.length === 0 ? h('div', { className: 'dshr-hint' }, '知识库还没有条目：阅读时点 📥 入库，或点左栏 📨 归档今日日报') : null,
-          )
-        : h(
-            'div',
-            { className: 'dshr-col dshr-items' },
-            items.map((it) =>
-              h(
-                'div',
-                {
-                  key: it.id,
-                  className: `dshr-item${it.read ? '' : ' unread'}${selected === it.id ? ' active' : ''}`,
-                  onClick: () => openItem(it.id),
-                },
-                h('div', { className: 'dshr-item-title' }, it.starred ? `★ ${it.title}` : it.title),
+              kbList.length === 0
+                ? h('div', { className: 'dshr-hint' }, '还没有条目。阅读文章时点 📥 收藏，或点左栏 📨 归档今日日报。')
+                : null,
+            ]
+          : [
+              items === null
+                ? [0, 1, 2, 3, 4].map((i) =>
+                    h('div', { key: `sk${i}`, className: 'dshr-skel' },
+                      h('div', { className: 'dshr-skel-bar', style: { width: '72%' } }),
+                      h('div', { className: 'dshr-skel-bar', style: { width: '38%' } }),
+                    ),
+                  )
+                : null,
+              Array.isArray(items) && items.map((it) =>
                 h(
                   'div',
-                  { className: 'dshr-item-meta' },
-                  `${it.feedTitle} · ${relTime(it.publishedAt)}`,
+                  {
+                    key: it.id,
+                    className: `dshr-item${it.read ? '' : ' unread'}${selected === it.id ? ' active' : ''}`,
+                    onClick: () => openItem(it.id),
+                  },
+                  h('div', { className: 'dshr-item-title' }, it.starred ? `★ ${it.title}` : it.title),
+                  h(
+                    'div',
+                    { className: 'dshr-item-meta' },
+                    `${it.feedTitle} · ${relTime(it.publishedAt)}`,
+                  ),
+                  it.snippet ? h('div', { className: 'dshr-item-snippet' }, it.snippet) : null,
                 ),
-                it.snippet ? h('div', { className: 'dshr-item-snippet' }, it.snippet) : null,
               ),
-            ),
-            items.length === 0 ? h('div', { className: 'dshr-hint' }, starredOnly ? '没有星标文章' : unreadOnly ? '没有未读文章' : '暂无文章') : null,
-          );
+              itemsLoaded && Array.isArray(items) && items.length === 0
+                ? h('div', { className: 'dshr-hint' }, starredOnly ? '没有星标文章' : unreadOnly ? '没有未读文章，读得很干净' : '暂无文章，点左栏 ⟳ 刷新看看')
+                : null,
+            ],
+      );
 
       // ----- 右栏：阅读面板 / 知识库详情
       const readerCol = kbView
@@ -701,78 +714,114 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- 样式
 
     const CSS = `
-.dshr-root { display: flex; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 14px; }
-.dshr-col { min-height: 0; overflow-y: auto; }
-.dshr-feeds { width: 240px; flex: none; border-right: 1px solid var(--dsw-alias-border-l1); display: flex; flex-direction: column; }
-.dshr-items { width: 340px; flex: none; border-right: 1px solid var(--dsw-alias-border-l1); }
-.dshr-reader { flex: 1; min-width: 0; }
-.dshr-head { display: flex; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.dshr-title { font-weight: 600; flex: 1; }
-.dshr-unread-toggle { display: flex; align-items: center; gap: 4px; color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer; }
-.dshr-btn { border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
-.dshr-btn:disabled { opacity: 0.5; cursor: default; }
+.dshr-root {
+  --r-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --r-fast: 140ms;
+  --r-med: 200ms;
+  display: flex; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.5;
+}
+.dshr-root ::selection { background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); }
+.dshr-root :focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; border-radius: 4px; }
+.dshr-col { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--dsw-alias-border-l2) transparent; }
+.dshr-col::-webkit-scrollbar { width: 8px; }
+.dshr-col::-webkit-scrollbar-thumb { background: var(--dsw-alias-border-l2); border-radius: 4px; }
+.dshr-col::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- 左栏：订阅 ---- */
+.dshr-feeds { width: 248px; flex: none; border-right: 1px solid var(--dsw-alias-border-l1); display: flex; flex-direction: column; background: var(--dsw-alias-specific-sidebar-fill, var(--dsw-alias-bg-layer-1)); }
+.dshr-head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 10px; }
+.dshr-title { font-weight: 600; flex: 1; font-size: 13px; letter-spacing: 0.02em; }
+.dshr-toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer; user-select: none; accent-color: var(--dsw-alias-brand-primary); }
+.dshr-toggle input { cursor: pointer; }
+.dshr-btn { border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 4px 11px; font-size: 12px; cursor: pointer; transition: background-color var(--r-fast) ease, border-color var(--r-fast) ease, transform 160ms var(--r-ease), opacity var(--r-fast) ease; }
+.dshr-btn:hover { background: var(--dsw-alias-bg-layer-2); }
+.dshr-btn:active { transform: scale(0.96); }
+.dshr-btn:disabled { opacity: 0.45; cursor: default; transform: none; }
 .dshr-btn-primary { background: var(--dsw-alias-brand-primary); border-color: transparent; color: var(--dsw-alias-bg-base); font-weight: 600; }
+.dshr-btn-primary:hover { filter: brightness(1.08); }
 .dshr-add { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.dshr-input { flex: 1; min-width: 0; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 5px 8px; font-size: 12px; outline: none; }
-.dshr-notice { padding: 6px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary); border-bottom: 1px solid var(--dsw-alias-border-l1); word-break: break-all; }
-.dshr-feed-list { flex: 1; overflow-y: auto; padding: 6px; }
-.dshr-feed { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px; cursor: pointer; }
+.dshr-input { flex: 1; min-width: 0; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 9px; font-size: 12px; outline: none; transition: border-color var(--r-fast) ease; }
+.dshr-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.dshr-notice { margin: 10px 12px; padding: 8px 10px; font-size: 12px; line-height: 1.6; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: inset 2px 0 0 var(--dsw-alias-brand-primary); word-break: break-all; }
+.dshr-feed-list { flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: thin; scrollbar-color: var(--dsw-alias-border-l2) transparent; }
+.dshr-feed { position: relative; display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background-color var(--r-fast) ease, box-shadow var(--r-fast) ease; }
 .dshr-feed:hover { background: var(--dsw-alias-bg-layer-1); }
-.dshr-feed.active { background: var(--dsw-alias-bg-layer-2); }
+.dshr-feed:active { background: var(--dsw-alias-bg-layer-2); }
+.dshr-feed.active { background: var(--dsw-alias-bg-layer-2); box-shadow: inset 2px 0 0 var(--dsw-alias-brand-primary); }
 .dshr-feed-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dshr-badge { flex: none; min-width: 18px; text-align: center; font-size: 11px; border-radius: 9px; padding: 0 5px; background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); font-weight: 600; }
+.dshr-badge { flex: none; min-width: 20px; text-align: center; font-size: 11px; font-weight: 600; border-radius: 10px; padding: 1px 6px; background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); }
 .dshr-filter-mark { flex: none; font-size: 11px; color: var(--dsw-alias-state-warn-primary); }
-.dshr-star { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 12px; padding: 0 2px; }
-.dshr-star:hover, .dshr-star.starred { color: var(--dsw-alias-state-warn-primary); }
-.dshr-kb-search { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-.dshr-kb-note { margin: 0 0 20px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); }
-.dshr-kb-note-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
-.dshr-kb-note-input { width: 100%; min-height: 72px; box-sizing: border-box; resize: vertical; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 8px; font-size: 13px; line-height: 1.6; margin-bottom: 8px; outline: none; font-family: inherit; }
-.dshr-related { margin-top: 28px; padding: 14px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; }
-.dshr-related-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
-.dshr-related-item { padding: 6px 4px; border-radius: 6px; cursor: pointer; }
-.dshr-related-item:hover { background: var(--dsw-alias-bg-layer-1); }
-.dshr-related-title { font-size: 13px; line-height: 1.5; }
-.dshr-kb-md h3 { font-size: 18px; margin: 18px 0 10px; }
-.dshr-kb-md h4 { font-size: 15px; margin: 16px 0 8px; color: var(--dsw-alias-brand-primary); }
-.dshr-kb-md h5 { font-size: 13px; margin: 12px 0 6px; }
-.dshr-kb-md ul { margin: 4px 0 10px; padding-left: 18px; }
-.dshr-kb-md li { margin: 3px 0; line-height: 1.7; }
-.dshr-kb-md p { margin: 6px 0; line-height: 1.7; }
-.dshr-kb-md a { color: var(--dsw-alias-brand-primary); text-decoration: none; word-break: break-all; }
-.dshr-kb-md a:hover { text-decoration: underline; }
-.dshr-kb-sp { height: 6px; }
-.dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 0 2px; visibility: hidden; }
+.dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px; padding: 0 3px; border-radius: 4px; visibility: hidden; }
 .dshr-feed:hover .dshr-feed-del { visibility: visible; }
-.dshr-hint { padding: 16px 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.7; }
-.dshr-item { padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); cursor: pointer; }
+.dshr-feed-del:hover { color: var(--dsw-alias-state-error-primary); }
+.dshr-hint { padding: 16px 14px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.8; }
+
+/* ---- 中栏：上下文条 + 列表 ---- */
+.dshr-items { width: 350px; flex: none; border-right: 1px solid var(--dsw-alias-border-l1); display: flex; flex-direction: column; }
+.dshr-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: color-mix(in srgb, var(--dsw-alias-bg-base) 82%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dshr-bar-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); letter-spacing: 0.02em; }
+.dshr-bar-input { flex: none; width: 130px; }
+.dshr-item { padding: 12px 16px 11px; border-bottom: 1px solid var(--dsw-alias-border-l1); cursor: pointer; transition: background-color var(--r-fast) ease, box-shadow var(--r-fast) ease; }
 .dshr-item:hover { background: var(--dsw-alias-bg-layer-1); }
-.dshr-item.active { background: var(--dsw-alias-bg-layer-2); }
-.dshr-item.unread .dshr-item-title { font-weight: 600; }
-.dshr-item.unread .dshr-item-title::before { content: '● '; color: var(--dsw-alias-brand-primary); font-size: 10px; }
-.dshr-item-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.5; }
-.dshr-item-meta { margin-top: 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.dshr-item.active { background: var(--dsw-alias-bg-layer-2); box-shadow: inset 3px 0 0 var(--dsw-alias-brand-primary); }
+.dshr-item.unread .dshr-item-title { font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dshr-item:not(.unread) .dshr-item-title { color: var(--dsw-alias-label-secondary); }
+.dshr-item.unread .dshr-item-title::before { content: '● '; color: var(--dsw-alias-brand-primary); font-size: 9px; vertical-align: 2px; }
+.dshr-item-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.45; font-size: 13.5px; }
+.dshr-item-meta { margin-top: 5px; font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
 .dshr-item-snippet { margin-top: 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.6; }
-.dshr-empty { padding: 48px 16px; text-align: center; color: var(--dsw-alias-label-secondary); }
-.dshr-article { max-width: 760px; margin: 0 auto; padding: 28px 32px 80px; }
-.dshr-article-title { font-size: 22px; line-height: 1.4; margin: 0 0 10px; }
-.dshr-article-meta { font-size: 12px; color: var(--dsw-alias-label-secondary); padding-bottom: 16px; border-bottom: 1px solid var(--dsw-alias-border-l1); margin-bottom: 20px; }
-.dshr-article-meta a { color: var(--dsw-alias-brand-primary); text-decoration: none; }
-.dshr-content { font-size: 15px; line-height: 1.85; word-break: break-word; }
-.dshr-content img, .dshr-content video { max-width: 100%; height: auto; }
-.dshr-content pre { overflow-x: auto; padding: 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1); font-size: 13px; }
-.dshr-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.dshr-content blockquote { margin: 0; padding: 2px 14px; border-left: 3px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); }
-.dshr-content a { color: var(--dsw-alias-brand-primary); }
-.dshr-content table { border-collapse: collapse; }
+.dshr-skel { padding: 14px 16px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dshr-skel-bar { height: 11px; border-radius: 5px; margin: 7px 0; background: linear-gradient(90deg, var(--dsw-alias-bg-layer-1) 25%, var(--dsw-alias-bg-layer-2) 45%, var(--dsw-alias-bg-layer-1) 65%); background-size: 240% 100%; animation: dshr-shimmer 1.4s ease infinite; }
+@keyframes dshr-shimmer { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
+
+/* ---- 右栏：阅读（唯一的"讲究"预算花在这里）---- */
+.dshr-reader { flex: 1; min-width: 0; }
+.dshr-empty { padding: 64px 16px; text-align: center; color: var(--dsw-alias-label-secondary); }
+.dshr-article { max-width: 72ch; margin: 0 auto; padding: 36px 44px 96px; }
+.dshr-article-title { font-size: 24px; font-weight: 650; line-height: 1.32; letter-spacing: -0.01em; margin: 0 0 12px; }
+.dshr-article-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--dsw-alias-label-secondary); padding-bottom: 18px; border-bottom: 1px solid var(--dsw-alias-border-l1); margin-bottom: 30px; }
+.dshr-article-meta a, .dshr-article-meta button { color: var(--dsw-alias-label-secondary); }
+.dshr-article-meta a:hover, .dshr-article-meta button:hover { color: var(--dsw-alias-brand-primary); }
+.dshr-content { font-family: Georgia, 'Times New Roman', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', SimSun, serif; font-size: 16.5px; line-height: 1.95; word-break: break-word; }
+.dshr-content img, .dshr-content video { max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; }
+.dshr-content p { margin: 0 0 1.3em; }
+.dshr-content h1, .dshr-content h2, .dshr-content h3, .dshr-content h4 { font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; line-height: 1.4; margin: 1.7em 0 0.6em; font-weight: 600; }
+.dshr-content h1 { font-size: 20px; } .dshr-content h2 { font-size: 18px; } .dshr-content h3 { font-size: 16px; } .dshr-content h4 { font-size: 15px; }
+.dshr-content hr { border: none; border-top: 1px solid var(--dsw-alias-border-l1); margin: 2em 0; }
+.dshr-content pre { overflow-x: auto; padding: 14px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1); font-size: 13px; line-height: 1.6; }
+.dshr-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+.dshr-content p code, .dshr-content li code { background: var(--dsw-alias-bg-layer-1); padding: 1px 5px; border-radius: 4px; }
+.dshr-content blockquote { margin: 0 0 1.2em; padding: 6px 16px; border-left: 3px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); }
+.dshr-content table { border-collapse: collapse; margin: 1em 0; }
 .dshr-content td, .dshr-content th { border: 1px solid var(--dsw-alias-border-l1); padding: 6px 10px; }
-/* 深色/浅色通吃：公众号等文章的内联样式写死颜色（黑字/白底），全部中和为主题色。
-   !important 作者样式表优先级高于无 !important 的内联样式 */
+.dshr-content ul, .dshr-content ol { padding-left: 24px; margin: 0 0 1.2em; }
+.dshr-content li { margin: 4px 0; }
+/* 深色/浅色通吃：中和文章内联写死的颜色（!important 作者样式 > 无 !important 内联） */
 .dshr-content * { color: inherit !important; background-color: transparent !important; background-image: none !important; }
 .dshr-content a { color: var(--dsw-alias-brand-primary) !important; }
 .dshr-content pre { background-color: var(--dsw-alias-bg-layer-1) !important; }
 .dshr-content pre, .dshr-content code { color: var(--dsw-alias-label-primary) !important; }
 .dshr-content blockquote { color: var(--dsw-alias-label-secondary) !important; }
+
+/* ---- 知识库 ---- */
+.dshr-kb-note { margin: 0 0 22px; padding: 14px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); }
+.dshr-kb-note-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
+.dshr-kb-note-input { width: 100%; min-height: 72px; box-sizing: border-box; resize: vertical; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 9px 10px; font-size: 13px; line-height: 1.65; margin-bottom: 8px; outline: none; font-family: inherit; transition: border-color var(--r-fast) ease; }
+.dshr-kb-note-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.dshr-related { margin-top: 30px; padding: 14px 16px; border-radius: 10px; background: var(--dsw-alias-bg-layer-1); }
+.dshr-related-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 6px; letter-spacing: 0.02em; }
+.dshr-related-item { padding: 8px 6px; border-radius: 6px; cursor: pointer; transition: background-color var(--r-fast) ease; }
+.dshr-related-item:hover { background: var(--dsw-alias-bg-base); }
+.dshr-related-title { font-size: 13px; line-height: 1.5; }
+
+/* ---- 动效纪律 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .dshr-root *, .dshr-root *::before, .dshr-root *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .dshr-skel-bar { animation: none !important; }
+}
+@media (hover: none) {
+  .dshr-feed-del { visibility: visible; }
+}
 `;
 
     // ---------------------------------------------------------------- 注册
