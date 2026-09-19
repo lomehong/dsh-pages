@@ -2,15 +2,14 @@
 
 DSH 内置 RSS 阅读器：Docker 数据层（RSSHub + wewe-rss）+ DSH 插件（`packages/reader`）。
 
-## 当前状态（P3 进行中）
+## 当前状态（✅ 全链路收官）
 
-- [x] P0：RSSHub(:1200) 容器运行，多路由已验证出内容
+- [x] P0：RSSHub(:1200) + we-mp-rss(:8001) 容器化运行
 - [x] P1：三栏阅读器（订阅/抓取/未读/全文/图片代理）真实宿主验证通过
-- [x] P2 代码：6 个 `reader_*` agent 工具，烟雾测试全绿
-- [x] P3 代码：星标 / 关键词过滤 / OPML 批量导入，烟雾测试全绿；已 git 化
-- [ ] P2+P3 验证：**重启 DSH Desktop 一次性点亮**（工具 + 新功能）
-- [ ] 公众号内容：we-mp-rss `weread_mp` 模式就绪，**等你扫码授权**（8001「微信读书」页）
-- [ ] 定时日报：依赖 P2 上岗后接入 commands/cron
+- [x] P2：6 个 `reader_*` 工具经 `agent/created` per-agent 注入，子代理真实调用出日报
+- [x] P3：星标 / 关键词过滤 / OPML 批量导入
+- [x] 公众号：weread_mp 扫码授权 → 全文（最大 14 万字符）+ mmbiz 图片代理实测 200
+- [ ] 定时日报（下一步可选）：接 dsh-schedule 每天自动出报
 
 ## 插件开发约定（血泪教训）
 
