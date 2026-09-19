@@ -704,6 +704,12 @@ function start(ctx) {
           return json(res, 200, { ok: removed });
         }
 
+        case 'kb/related': {
+          const articleId = u.searchParams.get('articleId') || '';
+          const limit = Math.min(Math.max(Number(u.searchParams.get('limit')) || 5, 1), 20);
+          return json(res, 200, relatedKbEntries(articleId, limit));
+        }
+
         default:
           return json(res, 404, { ok: false, error: `unknown endpoint: ${method}` });
       }
@@ -963,6 +969,34 @@ function start(ctx) {
     const v = kb().get(String(id ?? ''));
     if (!v) return null;
     return { id: String(id), ...v };
+  }
+
+  // 阅读反哺：按文章标题分词 + 订阅名，对知识库做 OR 加权匹配，返回最相关的几条
+  function relatedKbEntries(articleId, limit = 5) {
+    const v = items().get(String(articleId ?? ''));
+    if (!v) return [];
+    const f = feeds().get(v.feedId);
+    const terms = [
+      ...new Set([
+        ...v.title.split(/[，。！？、：；""''（）\s\-—·|「」【】]+/).filter((t) => t.length >= 2),
+        ...(f?.title ? [f.title] : []),
+      ]),
+    ];
+    if (terms.length === 0) return [];
+    const out = [];
+    for (const [id, k] of kb().entries()) {
+      // 注意：不排除本文的快照条目——读原文时"跳回自己的笔记"正是高价值相关项
+      const title = k.title.toLowerCase();
+      const hay = `${k.title} ${k.note ?? ''} ${(k.tags ?? []).join(' ')} ${k.contentText ?? ''}`.toLowerCase();
+      let score = 0;
+      for (const t of terms) {
+        if (title.includes(t.toLowerCase())) score += 2;
+        else if (hay.includes(t.toLowerCase())) score += 1;
+      }
+      if (score > 0) out.push({ id, kind: k.kind, title: k.title, snippet: (k.note || stripHtml(k.contentText)).slice(0, 100), createdAt: k.createdAt, score });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, limit);
   }
 
   const text = (t) => [{ type: 'text', text: t }];
@@ -1272,7 +1306,7 @@ function start(ctx) {
   registerReaderToolsRef = registerReaderTools;
   return {
     ready, listFeeds, listItems, addFeed, refreshFeed, refreshAll, getArticleText, buildDigest,
-    saveKbEntry, saveDigestToKb, searchKbEntries, getKbEntry,
+    saveKbEntry, saveDigestToKb, searchKbEntries, getKbEntry, relatedKbEntries,
     kbNote: async (id, note) => { await kb().update(String(id), (c) => ({ ...c, note: String(note ?? '') })); return true; },
     kbRemove: async (id) => kb().delete(String(id)),
   };

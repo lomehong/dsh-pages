@@ -85,6 +85,7 @@ window.__ModuleLoader__.load({
       const [kbQuery, setKbQuery] = React.useState('');
       const [kbDetail, setKbDetail] = React.useState(null);
       const [kbNote, setKbNote] = React.useState('');
+      const [relatedKb, setRelatedKb] = React.useState([]);
 
       const loadFeeds = React.useCallback(async () => {
         try {
@@ -242,10 +243,15 @@ window.__ModuleLoader__.load({
       async function openItem(id) {
         setSelected(id);
         setDetail(null);
+        setRelatedKb([]);
         try {
           const r = await api(`item?id=${encodeURIComponent(id)}`);
-          if (r && r.ok) setDetail(r.item);
-          else setNotice((r && r.error) || '文章加载失败');
+          if (r && r.ok) {
+            setDetail(r.item);
+            api(`kb/related?articleId=${encodeURIComponent(id)}`)
+              .then((list) => setRelatedKb(Array.isArray(list) ? list : []))
+              .catch(() => {});
+          } else setNotice((r && r.error) || '文章加载失败');
         } catch (e) {
           setNotice(`文章加载失败：${e.message || e}`);
         }
@@ -623,6 +629,28 @@ window.__ModuleLoader__.load({
                         '该源未提供全文，请 ',
                         h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文阅读'),
                       ),
+                  relatedKb.length > 0
+                    ? h(
+                        'div',
+                        { className: 'dshr-related' },
+                        h('div', { className: 'dshr-related-label' }, '🔗 知识库相关'),
+                        relatedKb.map((k) =>
+                          h(
+                            'div',
+                            {
+                              key: k.id,
+                              className: 'dshr-related-item',
+                              onClick: () => {
+                                setKbView(true);
+                                openKbEntry(k.id);
+                              },
+                            },
+                            h('div', { className: 'dshr-related-title' }, `${k.kind === 'digest' ? '📰 ' : k.kind === 'manual' ? '📝 ' : '📄 '}${k.title}`),
+                            k.snippet ? h('div', { className: 'dshr-item-snippet' }, k.snippet) : null,
+                          ),
+                        ),
+                      )
+                    : null,
                 )
               : h('div', { className: 'dshr-empty' }, '选择一篇文章开始阅读'),
           );
@@ -661,6 +689,11 @@ window.__ModuleLoader__.load({
 .dshr-kb-note { margin: 0 0 20px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); }
 .dshr-kb-note-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
 .dshr-kb-note-input { width: 100%; min-height: 72px; box-sizing: border-box; resize: vertical; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 8px; font-size: 13px; line-height: 1.6; margin-bottom: 8px; outline: none; font-family: inherit; }
+.dshr-related { margin-top: 28px; padding: 14px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; }
+.dshr-related-label { font-size: 12px; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; }
+.dshr-related-item { padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+.dshr-related-item:hover { background: var(--dsw-alias-bg-layer-1); }
+.dshr-related-title { font-size: 13px; line-height: 1.5; }
 .dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 0 2px; visibility: hidden; }
 .dshr-feed:hover .dshr-feed-del { visibility: visible; }
 .dshr-hint { padding: 16px 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.7; }

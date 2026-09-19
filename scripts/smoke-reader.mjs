@@ -274,6 +274,16 @@ check('kb/save-digest 日报归档', kbArch?.ok === true && kbArch.itemCount > 0
 const kbRemove = (await callApi('POST', 'kb/remove', { id: kbSave.id })).json;
 check('kb/remove 删除', kbRemove?.ok === true);
 
+// ---- 阅读反哺：文章页相关知识库条目
+if (first) {
+  const rel = (await callApi('GET', `kb/related?articleId=${encodeURIComponent(first.id)}`)).json;
+  check(
+    'kb/related 命中同源条目',
+    Array.isArray(rel) && rel.some((i) => i.title === first.title),
+    `${rel?.length ?? 0} 条相关`,
+  );
+}
+
 // ---- Agent 工具（P2）
 const expectedTools = [
   'reader_list_feeds', 'reader_list_items', 'reader_get_article', 'reader_add_feed', 'reader_refresh', 'reader_digest',
