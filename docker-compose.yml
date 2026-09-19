@@ -1,0 +1,47 @@
+services:
+  rsshub:
+    image: diygod/rsshub:latest
+    container_name: dsh-pages-rsshub
+    restart: unless-stopped
+    ports:
+      - "1200:1200"
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: memory
+      # 如需限制访问（公网暴露时），取消注释并设置口令，访问时 URL 需带 ?key=xxx
+      # ACCESS_KEY: change-me
+
+  wewe-rss:
+    image: cooderl/wewe-rss-sqlite:latest
+    container_name: dsh-pages-wewe-rss
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_TYPE: sqlite
+      # Web 管理页登录授权码，在 .env 中设置 WEWE_AUTH_CODE
+      AUTH_CODE: ${WEWE_AUTH_CODE}
+      SERVER_ORIGIN_URL: http://localhost:4000
+      # 输出全文，供阅读器和 AI 日报使用
+      FEED_MODE: fulltext
+      # 每 35 分钟更新一次公众号内容（几十个号足够）
+      CRON_EXPRESSION: "*/35 * * * *"
+      MAX_REQUEST_PER_MINUTE: "60"
+    volumes:
+      - ./data/wewe-rss:/app/data
+
+  we-mp-rss:
+    # 走 1ms.run 加速镜像（与本机 Docker 加速器匹配）；备选 ghcr.io/rachelos/we-mp-rss:latest
+    image: docker.1ms.run/rachelos/we-mp-rss:latest
+    container_name: dsh-pages-we-mp-rss
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # 微信读书采集模式：直连 weread.qq.com 无第三方中转，普通微信扫码即可，无需自有公众号
+      GATHER.MODEL: weread_mp
+      GATHER.CONTENT: "True"
+      # 微信读书频率限制：全文请求间隔不低于 2 秒
+      WEREAD_CONTENT_INTERVAL: "2"
+    volumes:
+      - ./data/we-mp-rss:/app/data

@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-pages/reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^4.5.0",
+    "zod": "^3.23.8"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

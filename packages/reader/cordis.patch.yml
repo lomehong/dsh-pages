@@ -1,0 +1,4 @@
+# dsh-pages 阅读器 bundle：向当前 profile 插入宿主+客户端插件行
+- insert:
+    - id: dsh-pages-reader
+      name: '@dsh-pages/reader'
