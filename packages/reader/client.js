@@ -70,12 +70,15 @@ window.__ModuleLoader__.load({
       const [items, setItems] = React.useState([]);
       const [feedId, setFeedId] = React.useState('all');
       const [unreadOnly, setUnreadOnly] = React.useState(false);
+      const [starredOnly, setStarredOnly] = React.useState(false);
       const [selected, setSelected] = React.useState(null);
       const [detail, setDetail] = React.useState(null);
       const [addUrl, setAddUrl] = React.useState('');
       const [adding, setAdding] = React.useState(false);
+      const [importing, setImporting] = React.useState(false);
       const [notice, setNotice] = React.useState('');
       const [refreshing, setRefreshing] = React.useState(false);
+      const fileInputRef = React.useRef(null);
 
       const loadFeeds = React.useCallback(async () => {
         try {
@@ -90,11 +93,12 @@ window.__ModuleLoader__.load({
           const params = new URLSearchParams();
           if (feedId !== 'all') params.set('feedId', feedId);
           if (unreadOnly) params.set('unreadOnly', '1');
+          if (starredOnly) params.set('starredOnly', '1');
           setItems(await api(`items?${params}`));
         } catch (e) {
           setNotice(`加载文章失败：${e.message || e}`);
         }
-      }, [feedId, unreadOnly]);
+      }, [feedId, unreadOnly, starredOnly]);
 
       // 仅挂载一次：首屏加载 + 后台刷新一轮 + 定时轻量重载
       React.useEffect(() => {
@@ -169,6 +173,66 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // OPML 批量导入
+      function pickOpmlFile() {
+        fileInputRef.current?.click();
+      }
+
+      async function onOpmlFile(e) {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        setImporting(true);
+        setNotice('正在导入 OPML…');
+        try {
+          const opml = await file.text();
+          const r = await api('feeds/import-opml', { opml });
+          if (r && r.ok) {
+            setNotice(
+              `OPML 导入完成：共 ${r.total} 个，新增 ${r.added.length}，已存在 ${r.skipped.length}` +
+                (r.failed.length ? `，失败 ${r.failed.length}（${r.failed[0].error}）` : ''),
+            );
+            await loadFeeds();
+            await loadItems();
+          } else {
+            setNotice(`导入失败：${(r && r.error) || '未知错误'}`);
+          }
+        } catch (err) {
+          setNotice(`导入失败：${err.message || err}`);
+        } finally {
+          setImporting(false);
+        }
+      }
+
+      // 关键词过滤编辑（格式：包含词1|包含词2 // 排除词1|排除词2）
+      async function editFilter(f) {
+        const cur = `${f.include || ''}${f.exclude ? ` // ${f.exclude}` : ''}`;
+        const input = window.prompt(
+          `「${f.title}」关键词过滤\n格式：包含词1|包含词2 // 排除词1|排除词2\n留空则清除过滤：`,
+          cur,
+        );
+        if (input === null) return;
+        const [include = '', exclude = ''] = input.split('//').map((s) => s.trim());
+        try {
+          await api('feeds/filter', { id: f.id, include, exclude });
+          setNotice(include || exclude ? `已设置「${f.title}」过滤` : `已清除「${f.title}」过滤`);
+          await loadFeeds();
+          await loadItems();
+        } catch (err) {
+          setNotice(`设置失败：${err.message || err}`);
+        }
+      }
+
+      async function toggleStar() {
+        if (!detail) return;
+        const next = !detail.starred;
+        try {
+          await api('items/star', { id: detail.id, starred: next });
+        } catch {}
+        setDetail((d) => (d ? { ...d, starred: next } : d));
+        setItems((cur) => cur.map((it) => (it.id === detail.id ? { ...it, starred: next } : it)));
+      }
+
       async function openItem(id) {
         setSelected(id);
         setDetail(null);
@@ -210,6 +274,16 @@ window.__ModuleLoader__.load({
             '未读',
           ),
           h(
+            'label',
+            { className: 'dshr-unread-toggle' },
+            h('input', {
+              type: 'checkbox',
+              checked: starredOnly,
+              onChange: (e) => setStarredOnly(e.target.checked),
+            }),
+            '星标',
+          ),
+          h(
             'button',
             { className: 'dshr-btn', onClick: refreshNow, disabled: refreshing },
             refreshing ? '刷新中…' : '刷新',
@@ -228,6 +302,18 @@ window.__ModuleLoader__.load({
             },
           }),
           h('button', { className: 'dshr-btn dshr-btn-primary', onClick: addFeed, disabled: adding }, adding ? '…' : '添加'),
+          h(
+            'button',
+            { className: 'dshr-btn', onClick: pickOpmlFile, disabled: importing, title: '从 OPML 文件批量导入订阅' },
+            importing ? '…' : 'OPML',
+          ),
+          h('input', {
+            ref: fileInputRef,
+            type: 'file',
+            accept: '.opml,.xml',
+            style: { display: 'none' },
+            onChange: onOpmlFile,
+          }),
         ),
         notice ? h('div', { className: 'dshr-notice' }, notice) : null,
         h(
@@ -251,8 +337,21 @@ window.__ModuleLoader__.load({
                 onClick: () => setFeedId(f.id),
                 title: f.lastError ? `抓取失败：${f.lastError}` : f.url,
               },
-              h('span', { className: 'dshr-feed-title' }, f.lastError ? `⚠ ${f.title}` : f.title),
+               h('span', { className: 'dshr-feed-title' }, f.lastError ? `⚠ ${f.title}` : f.title),
+              (f.include || f.exclude) ? h('span', { className: 'dshr-filter-mark', title: `过滤：${f.include || ''}${f.exclude ? ` // ${f.exclude}` : ''}` }, '⧩') : null,
               f.unread > 0 ? h('span', { className: 'dshr-badge' }, String(f.unread)) : null,
+              h(
+                'button',
+                {
+                  className: 'dshr-feed-del',
+                  title: '关键词过滤',
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    editFilter(f);
+                  },
+                },
+                '⚙',
+              ),
               h(
                 'button',
                 {
@@ -285,7 +384,7 @@ window.__ModuleLoader__.load({
               className: `dshr-item${it.read ? '' : ' unread'}${selected === it.id ? ' active' : ''}`,
               onClick: () => openItem(it.id),
             },
-            h('div', { className: 'dshr-item-title' }, it.title),
+            h('div', { className: 'dshr-item-title' }, it.starred ? `★ ${it.title}` : it.title),
             h(
               'div',
               { className: 'dshr-item-meta' },
@@ -294,7 +393,7 @@ window.__ModuleLoader__.load({
             it.snippet ? h('div', { className: 'dshr-item-snippet' }, it.snippet) : null,
           ),
         ),
-        items.length === 0 ? h('div', { className: 'dshr-hint' }, unreadOnly ? '没有未读文章' : '暂无文章') : null,
+        items.length === 0 ? h('div', { className: 'dshr-hint' }, starredOnly ? '没有星标文章' : unreadOnly ? '没有未读文章' : '暂无文章') : null,
       );
 
       // ----- 右栏：阅读面板
@@ -311,6 +410,16 @@ window.__ModuleLoader__.load({
                 { className: 'dshr-article-meta' },
                 `${detail.feedTitle}${detail.author ? ` · ${detail.author}` : ''} · ${relTime(detail.publishedAt)} · `,
                 h('a', { href: detail.link, target: '_blank', rel: 'noopener noreferrer' }, '打开原文 ↗'),
+                ' · ',
+                h(
+                  'button',
+                  {
+                    className: `dshr-star${detail.starred ? ' starred' : ''}`,
+                    onClick: toggleStar,
+                    title: detail.starred ? '取消星标' : '加星标',
+                  },
+                  detail.starred ? '★ 已星标' : '☆ 星标',
+                ),
               ),
               detail.contentHtml
                 ? h('div', {
@@ -354,6 +463,9 @@ window.__ModuleLoader__.load({
 .dshr-feed.active { background: var(--dsw-alias-bg-layer-2); }
 .dshr-feed-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshr-badge { flex: none; min-width: 18px; text-align: center; font-size: 11px; border-radius: 9px; padding: 0 5px; background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); font-weight: 600; }
+.dshr-filter-mark { flex: none; font-size: 11px; color: var(--dsw-alias-state-warn-primary); }
+.dshr-star { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 12px; padding: 0 2px; }
+.dshr-star:hover, .dshr-star.starred { color: var(--dsw-alias-state-warn-primary); }
 .dshr-feed-del { flex: none; border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 0 2px; visibility: hidden; }
 .dshr-feed:hover .dshr-feed-del { visibility: visible; }
 .dshr-hint { padding: 16px 12px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.7; }

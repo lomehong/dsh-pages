@@ -28,6 +28,9 @@ const FeedSchema = z.object({
   etag: z.string().nullable(),
   lastModified: z.string().nullable(),
   lastError: z.string().nullable(),
+  // 关键词过滤：| 分隔，include 命中其一才展示，exclude 命中其一即隐藏（空串不过滤）
+  include: z.string().default(''),
+  exclude: z.string().default(''),
 });
 
 const ItemSchema = z.object({
@@ -39,6 +42,7 @@ const ItemSchema = z.object({
   snippet: z.string(),
   contentHtml: z.string(),
   readAt: z.string().nullable(),
+  starredAt: z.string().nullable().default(null),
 });
 
 const DomainSpec = {
@@ -135,6 +139,27 @@ function toIso(value) {
   return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
+// 关键词过滤：include 命中其一才通过，exclude 命中其一即拒绝（| 分隔，大小写不敏感）
+function matchKeywords(title, include, exclude) {
+  const t = (title ?? '').toLowerCase();
+  const inc = (include ?? '').split('|').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const exc = (exclude ?? '').split('|').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (inc.length > 0 && !inc.some((k) => t.includes(k))) return false;
+  if (exc.length > 0 && exc.some((k) => t.includes(k))) return false;
+  return true;
+}
+
+// 解析 OPML，递归收集所有带 xmlUrl 的 outline
+function collectOpmlUrls(node, out = []) {
+  for (const n of Array.isArray(node) ? node : node ? [node] : []) {
+    if (n == null || typeof n !== 'object') continue;
+    const url = n['@_xmlUrl'] ?? n['@_xmlurl'];
+    if (url) out.push({ url: String(url), title: String(n['@_title'] ?? n['@_text'] ?? '') });
+    if (n.outline) collectOpmlUrls(n.outline, out);
+  }
+  return out;
+}
+
 const b64urlEncode = (s) => Buffer.from(s, 'utf8').toString('base64url');
 const b64urlDecode = (s) => Buffer.from(s, 'base64url').toString('utf8');
 
@@ -195,6 +220,9 @@ function start(ctx) {
     textNodeName: '#text',
     parseTagValue: false,
     trimValues: true,
+    // 必须显式开启属性解析（v4 默认丢弃）：Atom link/@_href、OPML outline/@_xmlUrl 全靠它
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
     // 全文 feed 实体数量大（&nbsp; 等），源均为自托管容器，放宽扩展上限
     processEntities: {
       maxTotalExpansions: 100000,
@@ -291,6 +319,7 @@ function start(ctx) {
         snippet: it.snippet,
         contentHtml: it.contentHtml,
         readAt: existing?.readAt ?? null,
+        starredAt: existing?.starredAt ?? null,
       });
       if (!existing) added += 1;
     }
@@ -316,6 +345,8 @@ function start(ctx) {
       etag: doc.etag ?? null,
       lastModified: doc.lastModified ?? null,
       lastError: null,
+      include: '',
+      exclude: '',
     });
     const added = await upsertItems(id, parsed.items);
     return { id, title: parsed.title, added };
@@ -368,25 +399,31 @@ function start(ctx) {
         addedAt: f.addedAt,
         lastFetchAt: f.lastFetchAt,
         lastError: f.lastError,
+        include: f.include ?? '',
+        exclude: f.exclude ?? '',
         unread: counts.get(id) ?? 0,
       }))
       .sort((a, b) => (a.addedAt < b.addedAt ? -1 : 1));
   }
 
-  function listItems(feedId, unreadOnly) {
-    const feedTitles = new Map([...feeds().entries()].map(([id, f]) => [id, f.title]));
+  function listItems(feedId, unreadOnly, starredOnly) {
+    const feedMap = new Map(feeds ? [...feeds().entries()] : []);
     const out = [];
     for (const [id, v] of items().entries()) {
       if (feedId && v.feedId !== feedId) continue;
       if (unreadOnly && v.readAt) continue;
+      if (starredOnly && !v.starredAt) continue;
+      const f = feedMap.get(v.feedId);
+      if (!matchKeywords(v.title, f?.include, f?.exclude)) continue;
       out.push({
         id,
         feedId: v.feedId,
-        feedTitle: feedTitles.get(v.feedId) ?? '',
+        feedTitle: f?.title ?? '',
         title: v.title,
         publishedAt: v.publishedAt,
         snippet: v.snippet,
         read: !!v.readAt,
+        starred: !!v.starredAt,
       });
     }
     out.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1));
@@ -462,10 +499,47 @@ function start(ctx) {
           return json(res, 200, id ? await refreshFeed(id) : await refreshAll());
         }
 
+        case 'feeds/filter': {
+          const id = String(body.id ?? '');
+          if (!feeds().get(id)) return json(res, 200, { ok: false, error: '订阅不存在' });
+          await feeds().update(id, (c) => ({
+            ...c,
+            include: String(body.include ?? ''),
+            exclude: String(body.exclude ?? ''),
+          }));
+          return json(res, 200, { ok: true });
+        }
+
+        case 'feeds/import-opml': {
+          const opmlText = String(body.opml ?? '');
+          if (!opmlText.trim()) return json(res, 200, { ok: false, error: 'OPML 内容为空' });
+          let doc;
+          try {
+            doc = xml.parse(opmlText);
+          } catch {
+            return json(res, 200, { ok: false, error: 'OPML 解析失败' });
+          }
+          const urls = collectOpmlUrls(doc?.opml?.body?.outline);
+          if (urls.length === 0) return json(res, 200, { ok: false, error: 'OPML 中未找到任何订阅（xmlUrl）' });
+          const added = [];
+          const skipped = [];
+          const failed = [];
+          for (const { url } of urls) {
+            try {
+              added.push(await addFeed(url));
+            } catch (e) {
+              if (/已存在/.test(e.message)) skipped.push(url);
+              else failed.push({ url, error: e.message });
+            }
+          }
+          return json(res, 200, { ok: true, total: urls.length, added, skipped, failed });
+        }
+
         case 'items': {
           const feedId = u.searchParams.get('feedId') || null;
           const unreadOnly = u.searchParams.get('unreadOnly') === '1';
-          return json(res, 200, listItems(feedId, unreadOnly));
+          const starredOnly = u.searchParams.get('starredOnly') === '1';
+          return json(res, 200, listItems(feedId, unreadOnly, starredOnly));
         }
 
         case 'item': {
@@ -484,6 +558,7 @@ function start(ctx) {
               publishedAt: v.publishedAt,
               contentHtml: rewriteMedia(v.contentHtml),
               snippet: v.snippet,
+              starred: !!v.starredAt,
             },
           });
         }
@@ -493,6 +568,14 @@ function start(ctx) {
           const read = body.read !== false;
           if (!items().get(id)) return json(res, 200, { ok: false });
           await items().update(id, (c) => ({ ...c, readAt: read ? new Date().toISOString() : null }));
+          return json(res, 200, { ok: true });
+        }
+
+        case 'items/star': {
+          const id = String(body.id ?? '');
+          const starred = body.starred !== false;
+          if (!items().get(id)) return json(res, 200, { ok: false });
+          await items().update(id, (c) => ({ ...c, starredAt: starred ? new Date().toISOString() : null }));
           return json(res, 200, { ok: true });
         }
 
@@ -610,14 +693,16 @@ function start(ctx) {
 
   function buildDigest(hours, unreadOnly) {
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
-    const feedTitles = new Map([...feeds().entries()].map(([id, f]) => [id, f.title]));
+    const feedMap = new Map([...feeds().entries()]);
     const groups = new Map();
     let itemCount = 0;
     const all = [...items().entries()].sort((a, b) => (a[1].publishedAt < b[1].publishedAt ? 1 : -1));
     for (const [id, v] of all) {
       if (unreadOnly ? !!v.readAt : v.publishedAt < since) continue;
       if (itemCount >= 100) break;
-      const g = groups.get(v.feedId) ?? { feedId: v.feedId, feedTitle: feedTitles.get(v.feedId) ?? '', items: [] };
+      const f = feedMap.get(v.feedId);
+      if (!matchKeywords(v.title, f?.include, f?.exclude)) continue; // 日报同样尊重关键词过滤
+      const g = groups.get(v.feedId) ?? { feedId: v.feedId, feedTitle: f?.title ?? '', items: [] };
       g.items.push({ id, title: v.title, publishedAt: v.publishedAt, snippet: v.snippet, link: v.link });
       groups.set(v.feedId, g);
       itemCount += 1;
@@ -664,6 +749,7 @@ function start(ctx) {
         properties: {
           feedId: { type: 'string', description: '只看某个订阅（id 来自 reader_list_feeds）' },
           unreadOnly: { type: 'boolean', description: '只看未读，默认 false' },
+          starredOnly: { type: 'boolean', description: '只看星标，默认 false' },
           limit: { type: 'number', description: '返回条数，默认 30，最大 100' },
         },
       },
@@ -681,7 +767,11 @@ function start(ctx) {
         await ready;
         const a = args ?? {};
         const limit = Math.min(Math.max(Number(a.limit) || 30, 1), 100);
-        return listItems(a.feedId ? String(a.feedId) : null, a.unreadOnly === true).slice(0, limit);
+        return listItems(
+          a.feedId ? String(a.feedId) : null,
+          a.unreadOnly === true,
+          a.starredOnly === true,
+        ).slice(0, limit);
       },
     });
 

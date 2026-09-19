@@ -170,6 +170,39 @@ if (first) {
 const addBad = await callApi('POST', 'feeds/add', { url: 'not-a-url' });
 check('非法地址返回 ok:false', addBad.json?.ok === false, addBad.json?.error ?? '');
 
+// ---- P3：星标 / 关键词过滤 / OPML 导入
+if (first) {
+  await callApi('POST', 'items/star', { id: first.id, starred: true });
+  const starredList = (await callApi('GET', 'items?starredOnly=1')).json;
+  check('星标后可按星标过滤', Array.isArray(starredList) && starredList.some((i) => i.id === first.id && i.starred === true));
+  await callApi('POST', 'items/star', { id: first.id, starred: false });
+  const unstarredList = (await callApi('GET', 'items?starredOnly=1')).json;
+  check('取消星标后从星标列表消失', !unstarredList?.some((i) => i.id === first.id));
+}
+
+const sspai = feeds.find((f) => /sspai|少数派/.test(f.title) || /sspai/.test(f.url));
+if (sspai) {
+  await callApi('POST', 'feeds/filter', { id: sspai.id, include: 'zzz不存在的词', exclude: '' });
+  const filtered = (await callApi('GET', `items?feedId=${sspai.id}`)).json;
+  check('关键词 include 过滤生效', Array.isArray(filtered) && filtered.length === 0, `${filtered?.length ?? '?'} 篇`);
+  await callApi('POST', 'feeds/filter', { id: sspai.id, include: '', exclude: '' });
+  const restored = (await callApi('GET', `items?feedId=${sspai.id}`)).json;
+  check('清除过滤后恢复', Array.isArray(restored) && restored.length > 0);
+}
+
+const opml = `<?xml version="1.0"?>
+<opml version="1.0"><body>
+<outline text="重复源" xmlUrl="http://localhost:1200/sspai/matrix"/>
+<outline text="新源" xmlUrl="http://localhost:4000/feeds/all.atom"/>
+<outline text="坏源" xmlUrl="http://localhost:9/nope"/>
+</body></opml>`;
+const imp = (await callApi('POST', 'feeds/import-opml', { opml })).json;
+check(
+  'OPML 导入：新增/跳过/失败分类正确',
+  imp?.ok === true && imp.total === 3 && imp.added?.length === 1 && imp.skipped?.length === 1 && imp.failed?.length === 1,
+  `total=${imp?.total} added=${imp?.added?.length} skipped=${imp?.skipped?.length} failed=${imp?.failed?.length}`,
+);
+
 // 媒体代理：错误密钥应 404
 const mediaHandler = matchRoute('/reader-media/wrong-secret/aaaa');
 check('媒体路由已注册并可匹配', typeof mediaHandler === 'function');
