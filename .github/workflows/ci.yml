@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch: # 支持手动触发（验证凭据/secret 等场景）
+
+jobs:
+  ci:
+    name: 语法/清单/装载校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: reader 依赖安装与装载冒烟
+        run: |
+          npm --prefix packages/reader ci
+          node --input-type=module -e "await import('./packages/reader/index.js'); console.log('reader index.js 装载 OK')"
+      - name: 全仓语法/清单校验（fail-closed）
+        run: node scripts/ci-check.mjs
