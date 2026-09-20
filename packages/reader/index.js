@@ -10,9 +10,8 @@ import { XMLParser } from 'fast-xml-parser';
 
 // 静态 inject 决定加载器挂载顺序：等这些服务就绪后本插件才启动。
 // 漏掉 'tools' 时，apply 期 tools 服务尚未挂载，运行时 inject 回调会被静默丢弃
-// （im-channel 的 export const inject = ['agents','tools'] 是实证范式）；
-// agents + sessionProjections 供 /reader-api/schedules 跨会话汇总排程
-export const inject = ['storageDomain', 'webServer', 'tools', 'agents', 'sessionProjections'];
+// （im-channel 的 export const inject = ['agents','tools'] 是实证范式）
+export const inject = ['storageDomain', 'webServer', 'tools'];
 
 const PLUGIN = 'dsh-pages-reader';
 // 注意：webserver 前缀匹配规则是 pathname === prefix || pathname.startsWith(prefix + '/')，
@@ -266,29 +265,6 @@ export function apply(ctx) {
   try {
     ctx.inject(['storageDomain', 'webServer'], (wctx) => {
       apiImpl = start(wctx);
-      // 跨会话排程聚合：agents/sessionProjections 已由静态 inject 保证，从顶层 ctx 读取
-      apiImpl.getSchedules = () => {
-        const sessions = [];
-        let total = 0;
-        for (const agent of ctx.agents.list()) {
-          try {
-            const snap = ctx.sessionProjections.snapshot(agent.session, ['schedule']);
-            const active = snap?.values?.schedule;
-            if (Array.isArray(active) && active.length > 0) {
-              sessions.push({
-                sessionId: String(agent.id),
-                schedules: active.map((r) => ({
-                  id: String(r.id ?? ''),
-                  prompt: String(r.prompt ?? ''),
-                  scheduledAt: r.scheduledAt ? String(r.scheduledAt) : null,
-                })),
-              });
-              total += active.length;
-            }
-          } catch {}
-        }
-        return { ok: true, total, sessions };
-      };
     });
   } catch (e) {
     console.error(`[${PLUGIN}] apply failed: ${e?.stack || e}`);
@@ -882,13 +858,6 @@ function start(ctx) {
           const articleId = u.searchParams.get('articleId') || '';
           const limit = Math.min(Math.max(Number(u.searchParams.get('limit')) || 5, 1), 20);
           return json(res, 200, relatedKbEntries(articleId, limit));
-        }
-
-        // 跨会话排程汇总：数据由 apply 顶层挂载的 getSchedules 提供（读取 dsh-schedule projection）
-        case 'schedules': {
-          const get = apiImpl?.getSchedules;
-          if (typeof get !== 'function') return json(res, 503, { ok: false, error: '排程聚合不可用' });
-          return json(res, 200, get());
         }
 
         default:
