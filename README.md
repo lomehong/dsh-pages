@@ -27,6 +27,7 @@ DSH 内置 RSS 阅读器：Docker 数据层（RSSHub + wewe-rss）+ DSH 插件�
 - **`apply()` 绝不抛错**：装载期异常会拖死整个宿主；入口必须顶层 try/catch 兜底
 - **link 插件依赖自持**：改动 `packages/reader` 后先在该目录 `npm install`，再 `node ../scripts/smoke-reader.mjs` 干跑验证，最后才重启宿主
 - **host 代码改动需重启 DSH Desktop 生效**；client 改动经 HMR 生效
+- **槽位是功能性契约，不是空白留白**：single 型槽位（如 `sidebar.workspaces.directoryFlow` =「添加工作区」入口）被第二家注入会拖垮整个 web boot 且零报错零日志——加页面的正确姿势是 `sidebar.panellist` 图标 + `main` 面板（list 型槽位多占合法，参照 reader）；挂载失败面板会把错误吞成摘要，细节要从 `window.__DSH_BOOT__` 的 bundle URL（404 = 批内任一 client.js 缺失）和「对照实例 A/B 实验」里挖
 
 ## 安全模型（两层 HTML 消毒）
 
