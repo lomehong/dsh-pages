@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
+    // client 顶层 ctx 引用（apply 时赋值）：定时任务条目点击跳会话用 uiWorkspace
+    let clientCtxRef = null;
 
     const API = '/reader-api/';
 
@@ -129,6 +131,23 @@ window.__ModuleLoader__.load({
       if (p === 'http' || p === 'https' || p === 'mailto') return value;
       if (allowDataImage && p === 'data' && /^data:image\//i.test(cleaned)) return value;
       return null;
+    }
+
+    // ---- 定时任务小部件辅助（数据来自 dsh-schedule-ui 插件的聚合端点）----
+    function schedFirstLine(prompt) {
+      const l = String(prompt || '').split(/\r?\n/)[0].trim();
+      return l.length > 42 ? `${l.slice(0, 42)}…` : l || '（无描述）';
+    }
+    function schedTime(scheduledAt) {
+      const t = new Date(scheduledAt).getTime();
+      if (Number.isNaN(t)) return '';
+      const d = new Date(t);
+      const now = new Date();
+      const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
+      const tmr = new Date(now.getTime() + 86400_000);
+      if (d.toDateString() === tmr.toDateString()) return `明天 ${hm}`;
+      return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
     }
 
     function sanitizeArticleHtml(html) {
@@ -326,6 +345,51 @@ window.__ModuleLoader__.load({
         noticeTimer.current = setTimeout(() => setNoticeState(null), kind === 'err' ? 8000 : 3500);
       };
       React.useEffect(() => () => clearTimeout(noticeTimer.current), []);
+
+      // ---------------- 定时任务（数据：dsh-schedule-ui 插件聚合端点） ----------------
+      const [schedOpen, setSchedOpen] = React.useState(false);
+      const [schedEntries, setSchedEntries] = React.useState([]);
+      const [schedTotal, setSchedTotal] = React.useState(0);
+      const schedCloseTimer = React.useRef(null);
+      const loadSchedules = React.useCallback(async () => {
+        try {
+          const r = await fetch('/dsh-schedule-ui/api/schedules').then((x) => x.json());
+          if (!(r && r.ok)) return;
+          const entries = [];
+          for (const s of r.sessions || []) {
+            for (const sch of s.schedules || []) {
+              entries.push({
+                id: String(sch.id ?? ''),
+                title: schedFirstLine(sch.prompt),
+                at: schedTime(sch.scheduledAt),
+                sessionId: s.sessionId,
+              });
+            }
+          }
+          setSchedEntries(entries);
+          setSchedTotal(r.total || entries.length);
+        } catch {}
+      }, []);
+      React.useEffect(() => {
+        loadSchedules();
+        const t = setInterval(loadSchedules, 60 * 1000);
+        return () => clearInterval(t);
+      }, [loadSchedules]);
+      const schedEnter = () => {
+        if (schedCloseTimer.current) clearTimeout(schedCloseTimer.current);
+        schedCloseTimer.current = null;
+        setSchedOpen(true);
+        loadSchedules();
+      };
+      const schedLeave = () => {
+        if (schedCloseTimer.current) clearTimeout(schedCloseTimer.current);
+        schedCloseTimer.current = setTimeout(() => setSchedOpen(false), 300);
+      };
+      const schedJump = (sessionId) => {
+        try {
+          clientCtxRef?.uiWorkspace?.openSession(sessionId);
+        } catch {}
+      };
 
       // ---------------- 数据加载 ----------------
 
@@ -806,6 +870,35 @@ window.__ModuleLoader__.load({
             return editor ? [row, editor] : [row];
           }),
           feeds.length === 0 ? h('div', { className: 'dshr-hint' }, '还没有订阅。点上方「订阅源」添加，试试 http://localhost:1200/sspai/matrix') : null,
+        ),
+        // 定时任务条：默认收起，悬停展开（数据：dsh-schedule-ui 插件聚合端点）
+        h(
+          'div',
+          {
+            className: `dshr-sched${schedOpen ? ' open' : ''}`,
+            onMouseEnter: schedEnter,
+            onMouseLeave: schedLeave,
+          },
+          h('div', { className: 'dshr-sched-bar', onClick: () => setSchedOpen((o) => !o) }, `⏰ 定时任务 · ${schedTotal}`),
+          h(
+            'div',
+            { className: 'dshr-sched-list' },
+            schedEntries.length === 0
+              ? h('div', { className: 'dshr-sched-empty' }, '暂无定时任务。在会话里说「每天 8 点做 XX」即可创建。')
+              : schedEntries.map((e) =>
+                  h(
+                    'div',
+                    {
+                      key: e.id,
+                      className: 'dshr-sched-entry',
+                      onClick: () => schedJump(e.sessionId),
+                      title: '点击打开所属会话',
+                    },
+                    h('div', { className: 'dshr-sched-entry-main' }, e.title),
+                    h('div', { className: 'dshr-sched-entry-meta' }, `下次触发 · ${e.at}`),
+                  ),
+                ),
+          ),
         ),
       );
 
@@ -1292,13 +1385,26 @@ window.__ModuleLoader__.load({
 @media (hover: none) {
   .dshr-rowacts { visibility: visible; }
 }
+
+/* ---- 定时任务条（左栏底部，默认收起，悬停展开）---- */
+.dshr-sched { border-top: 1px solid var(--dsw-alias-border-l1); flex: none; max-height: 33px; overflow: hidden; display: flex; flex-direction: column; transition: max-height 240ms var(--r-ease); }
+.dshr-sched.open { max-height: 300px; }
+.dshr-sched-bar { flex: none; padding: 8px 16px; font-size: 12px; color: var(--dsw-alias-label-secondary); cursor: pointer; white-space: nowrap; user-select: none; }
+.dshr-sched.open .dshr-sched-bar { color: var(--dsw-alias-label-primary); }
+.dshr-sched-list { overflow-y: auto; padding: 0 8px 8px; }
+.dshr-sched-entry { padding: 7px 9px; border-radius: 7px; cursor: pointer; transition: background-color var(--r-fast) ease; }
+.dshr-sched-entry:hover { background: var(--dsw-alias-bg-layer-1); }
+.dshr-sched-entry-main { font-size: 12.5px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshr-sched-entry-meta { margin-top: 3px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dshr-sched-empty { padding: 8px; font-size: 11.5px; color: var(--dsw-alias-label-secondary); line-height: 1.7; }
 `;
 
     // ---------------------------------------------------------------- 注册
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'uiWorkspace'],
       apply(ctx) {
+        clientCtxRef = ctx;
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register({ name: 'sidebar.panellist', id: 'reading', order: 10, label: '阅读' }, PanelIcon),
         );
