@@ -12,6 +12,10 @@
     "fast-xml-parser": "^4.5.0",
     "zod": "^3.23.8"
   },
+  "bundleDependencies": [
+    "fast-xml-parser",
+    "zod"
+  ],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {

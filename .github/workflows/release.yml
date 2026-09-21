@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 GitHub Release 并上传 tarball
+
+# 纯 GitHub 分发：tag 一推 → 校验 + 三包 tarball 挂 GitHub Release。
+# reader 为自包含 tarball（bundleDependencies 随包）；安装：dsh plugin --profile web add <Release 页面的 .tgz URL>
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 全仓语法/清单/结构校验
+        run: node scripts/ci-check.mjs
+      - name: reader 依赖安装（bundleDependencies 打包前置）
+        run: npm --prefix packages/reader ci
+      - name: 打包三插件 tarball
+        run: |
+          mkdir -p dist
+          for pkg in memory reader schedule; do
+            (cd "packages/$pkg" && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/dist")
+          done
+          ls dist/*.tgz
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: 'dist/*.tgz'
