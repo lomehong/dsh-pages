@@ -38,10 +38,8 @@ services:
     ports:
       - "8001:8001"
     environment:
-      # 微信读书采集模式：直连 weread.qq.com 无第三方中转，普通微信扫码即可，无需自有公众号
-      GATHER.MODEL: weread_mp
+      # 采集模式：wx.login 已授权（微信扫码登录公众号平台通道），用默认 app 模式采集
+      # （曾短暂切到 weread_mp，后发现平台通道扫码已成功且更稳，切回；weread_mp 需另行配 Cookie）
       GATHER.CONTENT: "True"
-      # 微信读书频率限制：全文请求间隔不低于 2 秒
-      WEREAD_CONTENT_INTERVAL: "2"
     volumes:
       - ./data/we-mp-rss:/app/data
